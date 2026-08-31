@@ -18,3 +18,6 @@ the check does not run until the merge succeeds.
 to fork policy and maintenance files, and runs the explicit focused test list in
 `scripts/fork-check-tests.json`. Add a stable test file to that manifest when fork-specific behavior
 gains a new test seam. Full CI still runs independently on both `main` and `mutecat/main`.
+
+The fork selects GitHub-hosted runners for that CI because upstream's Blacksmith pool is private.
+The workflow keeps the original Blacksmith labels for runs in the upstream repository.

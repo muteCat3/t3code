@@ -25,6 +25,10 @@ and pushes to `main` or the private fork's `mutecat/main` product branch:
   its policy and maintenance files with the repository's existing Vite+ formatter, and runs the
   focused orchestration tests listed in `scripts/fork-check-tests.json`.
 
+Upstream jobs retain their Blacksmith runner labels. In `muteCat3/t3code`, the same jobs select
+GitHub-hosted Ubuntu and macOS runners because the fork does not own the upstream Blacksmith runner
+pool.
+
 `.github/workflows/release.yml` builds macOS (`arm64` and `x64`), Linux (`x64`), and Windows (`x64`)
 desktop artifacts from a single `v*.*.*` tag and publishes one GitHub release. It auto-enables
 signing only when platform credentials are present. macOS passkey builds additionally require

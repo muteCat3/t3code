@@ -42,6 +42,13 @@ const checkPolicyFiles = () => {
   if (!/^\s{2}fork_check:$/mu.test(workflow) || !/^\s+run: pnpm fork:check$/mu.test(workflow)) {
     fail("CI must contain the separate fork:check job");
   }
+  if (
+    !workflow.includes("github.repository == 'muteCat3/t3code'") ||
+    !workflow.includes("'ubuntu-24.04'") ||
+    !workflow.includes("'macos-15'")
+  ) {
+    fail("CI must select GitHub-hosted runners for the muteCat fork");
+  }
 };
 
 const check = () => {
