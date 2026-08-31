@@ -251,6 +251,32 @@ export function useThreadListActions(): {
 
   const archiveThread = useCallback(
     (thread: EnvironmentThreadShell) => {
+      const directChildren = appAtomRegistry
+        .get(environmentThreadShells.threadShellsAtom)
+        .filter(
+          (candidate) =>
+            candidate.environmentId === thread.environmentId &&
+            candidate.agentParentThreadId === thread.id &&
+            candidate.archivedAt === null,
+        );
+      if (directChildren.length > 0) {
+        Alert.alert(
+          `Archive “${thread.title}”?`,
+          [
+            `Its ${directChildren.length} direct child ${directChildren.length === 1 ? "thread" : "threads"} will be interrupted, drained, and archived first:`,
+            ...directChildren.map((child) => `• ${child.title}`),
+          ].join("\n"),
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Archive",
+              style: "destructive",
+              onPress: () => void executeAction("archive", thread),
+            },
+          ],
+        );
+        return;
+      }
       void executeAction("archive", thread);
     },
     [executeAction],

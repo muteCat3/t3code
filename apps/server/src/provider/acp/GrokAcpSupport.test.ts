@@ -3,12 +3,76 @@ import * as Effect from "effect/Effect";
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
+  applyGrokAcpInteractionMode,
   applyGrokAcpModelSelection,
   buildGrokAcpSpawnInput,
   grokAcpSpawnArgs,
   isValidGrokReasoningEffortToken,
   resolveGrokAcpBaseModelId,
 } from "./GrokAcpSupport.ts";
+
+describe("applyGrokAcpInteractionMode", () => {
+  const modes = {
+    currentModeId: "ask",
+    availableModes: [
+      { id: "ask", name: "Ask" },
+      { id: "architect", name: "Architect" },
+      { id: "code", name: "Code" },
+    ],
+  };
+
+  it.effect("selects Grok's advertised architect mode for plan interaction", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const selected = yield* applyGrokAcpInteractionMode({
+        runtime: {
+          setMode: (modeId) => Effect.sync(() => (calls.push(modeId), {})),
+        },
+        modeState: modes,
+        interactionMode: "plan",
+        mapError: (cause) => cause.message,
+        unsupported: (mode) => `unsupported:${mode}`,
+      });
+      expect(selected).toBe("architect");
+      expect(calls).toEqual(["architect"]);
+    }),
+  );
+
+  it.effect("selects Grok's advertised code mode for default interaction", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const selected = yield* applyGrokAcpInteractionMode({
+        runtime: {
+          setMode: (modeId) => Effect.sync(() => (calls.push(modeId), {})),
+        },
+        modeState: modes,
+        interactionMode: "default",
+        mapError: (cause) => cause.message,
+        unsupported: (mode) => `unsupported:${mode}`,
+      });
+      expect(selected).toBe("code");
+      expect(calls).toEqual(["code"]);
+    }),
+  );
+
+  it.effect("fails instead of silently running plan work without an advertised plan mode", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        applyGrokAcpInteractionMode({
+          runtime: { setMode: () => Effect.succeed({}) },
+          modeState: {
+            currentModeId: "code",
+            availableModes: [{ id: "code", name: "Code" }],
+          },
+          interactionMode: "plan",
+          mapError: (cause) => cause.message,
+          unsupported: (mode) => `unsupported:${mode}`,
+        }),
+      );
+      expect(error).toBe("unsupported:plan");
+    }),
+  );
+});
 
 describe("resolveGrokAcpBaseModelId", () => {
   it("normalizes empty and custom Grok model ids", () => {

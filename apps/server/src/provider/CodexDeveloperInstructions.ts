@@ -21,6 +21,18 @@ Do not switch to global browser skills, Chrome, Node REPL browser automation, st
 const browserToolInstructions = (browserToolsAvailable: boolean): string =>
   browserToolsAvailable ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "";
 
+const T3_AGENT_ORCHESTRATION_INSTRUCTIONS = `
+
+## T3 Code child-agent orchestration
+
+The \`t3-orchestration\` MCP server is attached to this top-level Root thread. Use its \`agent_*\` tools for delegation; they create durable T3 child threads that remain visible and controllable in the product.
+
+Native in-process Codex collaboration children are unsupported in T3 Code orchestration because they inherit the Root MCP identity. Do not use native collaboration tools for delegation. Use \`agent_spawn\` and the corresponding \`agent_send\`, \`agent_wait\`, \`agent_inspect\`, \`agent_respond\`, \`agent_interrupt\`, \`agent_archive\`, and \`agent_unarchive\` tools instead.
+`;
+
+const orchestrationToolInstructions = (orchestrationToolsAvailable: boolean): string =>
+  orchestrationToolsAvailable ? T3_AGENT_ORCHESTRATION_INSTRUCTIONS : "";
+
 export const codexPlanModeDeveloperInstructions = (
   browserToolsAvailable: boolean,
 ): string => `<collaboration_mode># Plan Mode (Conversational)
@@ -189,12 +201,14 @@ export function buildCodexDeveloperInstructions(
    * setting, so the prompt cannot claim tools the turn doesn't have.
    */
   browserToolsAvailable = true,
+  /** Whether the isolated `t3-orchestration` MCP server is attached. */
+  orchestrationToolsAvailable = false,
 ): string {
   const base =
     interactionMode === "plan"
       ? codexPlanModeDeveloperInstructions(browserToolsAvailable)
       : codexDefaultModeDeveloperInstructions(browserToolsAvailable);
-  return `${base}
+  return `${base}${orchestrationToolInstructions(orchestrationToolsAvailable)}
 
 <runtime_info>In case you're asked: you are running in T3 Code through the Codex harness, as ${toSingleLine(runtime.model)} with ${toSingleLine(runtime.reasoningEffort)} reasoning effort. No need to mention this otherwise.</runtime_info>`;
 }

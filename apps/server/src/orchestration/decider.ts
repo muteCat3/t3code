@@ -288,6 +288,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.defaultModelSelection !== undefined
             ? { defaultModelSelection: command.defaultModelSelection }
             : {}),
+          ...(command.agentOrchestrationTrusted !== undefined
+            ? { agentOrchestrationTrusted: command.agentOrchestrationTrusted }
+            : {}),
           ...(command.defaultThreadEnvMode !== undefined
             ? { defaultThreadEnvMode: command.defaultThreadEnvMode }
             : {}),
@@ -371,6 +374,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           projectId: command.projectId,
+          agentParentThreadId: command.agentParentThreadId ?? null,
           title: command.title,
           modelSelection: command.modelSelection,
           runtimeMode: command.runtimeMode,

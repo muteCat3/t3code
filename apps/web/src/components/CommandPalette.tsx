@@ -1637,7 +1637,17 @@ function OpenCommandPaletteDialog(props: {
     actionItems.push({
       kind: "action",
       value: "action:project-settings",
-      searchTerms: ["project", "settings", "scripts", "model", "grouping", "checkout"],
+      searchTerms: [
+        "project",
+        "settings",
+        "scripts",
+        "model",
+        "grouping",
+        "checkout",
+        "agent orchestration",
+        "delegation",
+        "trusted root",
+      ],
       title: "Project settings",
       description: contextualProjectGroup.displayName,
       icon: <FolderIcon className={ITEM_ICON_CLASS} />,

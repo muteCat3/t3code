@@ -1,4 +1,5 @@
 import {
+  ClientOrchestrationCommand,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -11,6 +12,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Schema from "effect/Schema";
 
 import { decideOrchestrationCommand } from "./decider.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
@@ -39,6 +41,41 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
       const event = Array.isArray(result) ? result[0] : result;
       expect(event.type).toBe("project.created");
       expect((event.payload as { scripts: unknown[] }).scripts).toEqual([]);
+    }),
+  );
+
+  it.effect("cannot create a pre-trusted project", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const command = yield* Schema.decodeUnknownEffect(ClientOrchestrationCommand)({
+        type: "project.create",
+        commandId: "cmd-project-create-trusted",
+        projectId: "project-trusted",
+        title: "Trusted",
+        workspaceRoot: "/tmp/trusted",
+        agentOrchestrationTrusted: true,
+        createdAt: now,
+      });
+      expect("agentOrchestrationTrusted" in command).toBe(false);
+      if (command.type !== "project.create") {
+        return yield* Effect.die("Expected decoded project.create command.");
+      }
+
+      const result = yield* decideOrchestrationCommand({
+        command,
+        readModel: createEmptyReadModel(now),
+      });
+      const planned = Array.isArray(result) ? result[0] : result;
+      if (!planned || planned.type !== "project.created") {
+        return yield* Effect.die("Expected project.created event.");
+      }
+      expect("agentOrchestrationTrusted" in planned.payload).toBe(false);
+
+      const projected = yield* projectEvent(createEmptyReadModel(now), {
+        ...planned,
+        sequence: 1,
+      });
+      expect(projected.projects[0]?.agentOrchestrationTrusted).toBe(false);
     }),
   );
 

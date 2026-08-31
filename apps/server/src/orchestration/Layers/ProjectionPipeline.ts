@@ -518,6 +518,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             title: event.payload.title,
             workspaceRoot: event.payload.workspaceRoot,
             defaultModelSelection: event.payload.defaultModelSelection,
+            agentOrchestrationTrusted: false,
             defaultThreadEnvMode: null,
             faviconPath: event.payload.faviconPath ?? null,
             scripts: event.payload.scripts,
@@ -542,6 +543,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : {}),
             ...(event.payload.defaultModelSelection !== undefined
               ? { defaultModelSelection: event.payload.defaultModelSelection }
+              : {}),
+            ...(event.payload.agentOrchestrationTrusted !== undefined
+              ? { agentOrchestrationTrusted: event.payload.agentOrchestrationTrusted }
               : {}),
             ...(event.payload.defaultThreadEnvMode !== undefined
               ? { defaultThreadEnvMode: event.payload.defaultThreadEnvMode }
@@ -628,6 +632,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* projectionThreadRepository.upsert({
             threadId: event.payload.threadId,
             projectId: event.payload.projectId,
+            agentParentThreadId: event.payload.agentParentThreadId ?? null,
             title: event.payload.title,
             modelSelection: event.payload.modelSelection,
             runtimeMode: event.payload.runtimeMode,
@@ -1215,6 +1220,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         providerName: event.payload.session.providerName,
         providerInstanceId: event.payload.session.providerInstanceId ?? null,
         runtimeMode: event.payload.session.runtimeMode,
+        requestedModelSelection: event.payload.session.requestedModelSelection ?? null,
+        appliedModelSelection: event.payload.session.appliedModelSelection ?? null,
+        providerReportedModelId: event.payload.session.providerReportedModelId ?? null,
         activeTurnId: event.payload.session.activeTurnId,
         lastError: event.payload.session.lastError,
         updatedAt: event.payload.session.updatedAt,

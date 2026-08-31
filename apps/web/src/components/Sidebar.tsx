@@ -102,6 +102,10 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { openCommandPalette } from "../commandPaletteBus";
+import {
+  archiveThreadConfirmationMessage,
+  visibleDirectChildCount,
+} from "../lib/agentOrchestrationUi";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
@@ -3246,9 +3250,9 @@ export default function Sidebar() {
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
           case "archive": {
-            if (confirmThreadArchive) {
+            if (confirmThreadArchive || visibleDirectChildCount(thread, threads) > 0) {
               const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(`Archive thread "${thread.title}"?`),
+                api.dialogs.confirm(archiveThreadConfirmationMessage(thread, threads)),
               );
               if (confirmed._tag === "Failure" || !confirmed.value) return;
             }

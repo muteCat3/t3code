@@ -183,6 +183,43 @@ describe("buildTurnStartParams", () => {
     });
   });
 
+  it("documents that native in-process Codex collaboration shares the Root runtime and MCP config and is not technically blocked", () => {
+    const rootAppServerArgs = codexSessionAppServerArgs(
+      ["-c", "mcp_servers.t3-orchestration.url=http://127.0.0.1:43123/mcp/orchestration"],
+      undefined,
+    );
+    const params = Effect.runSync(
+      buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "Delegate this",
+        model: "gpt-5.4",
+        interactionMode: "default",
+        orchestrationToolsAvailable: true,
+      }),
+    );
+
+    // This is intentionally a policy limitation, not a claimed sandbox:
+    // native children run inside this same Codex app-server process, inherit
+    // its Root MCP configuration, and remain technically available. The
+    // attached orchestration prompt steers the model to agent_* tools without
+    // removing Codex's native collaboration mode or tools.
+    NodeAssert.ok(
+      rootAppServerArgs.includes(
+        "mcp_servers.t3-orchestration.url=http://127.0.0.1:43123/mcp/orchestration",
+      ),
+    );
+    NodeAssert.equal(params.collaborationMode?.mode, "default");
+    NodeAssert.match(
+      params.collaborationMode?.settings.developer_instructions ?? "",
+      /agent_spawn/,
+    );
+    NodeAssert.match(
+      params.collaborationMode?.settings.developer_instructions ?? "",
+      /native collaboration tools for delegation/,
+    );
+  });
+
   it("reports the same fallback model and effort in settings and instructions", () => {
     const params = Effect.runSync(
       buildTurnStartParams({
@@ -539,12 +576,42 @@ describe("T3 browser developer instructions", () => {
   });
 });
 
+describe("T3 child-agent developer instructions", () => {
+  const runtime = { model: "gpt-5.4", reasoningEffort: "high" };
+
+  it("mentions agent tools and rejects native collaboration only when attached", () => {
+    const attached = buildCodexDeveloperInstructions("default", runtime, false, true);
+    NodeAssert.match(attached, /t3-orchestration/);
+    NodeAssert.match(attached, /agent_spawn/);
+    NodeAssert.match(attached, /Native in-process Codex collaboration children are unsupported/);
+
+    const detached = buildCodexDeveloperInstructions("default", runtime, false, false);
+    NodeAssert.doesNotMatch(detached, /agent_\*/);
+    NodeAssert.doesNotMatch(detached, /agent_spawn/);
+    NodeAssert.doesNotMatch(detached, /native collaboration tools/);
+  });
+});
+
 describe("hasConfiguredMcpServer", () => {
   it("detects inline Codex MCP configuration arguments", () => {
     NodeAssert.equal(hasConfiguredMcpServer(undefined), false);
     NodeAssert.equal(hasConfiguredMcpServer(["--model", "gpt-5.4"]), false);
     NodeAssert.equal(
       hasConfiguredMcpServer(["-c", 'mcp_servers.t3-code.url="http://127.0.0.1/mcp"']),
+      true,
+    );
+    NodeAssert.equal(
+      hasConfiguredMcpServer(
+        ["-c", 'mcp_servers.t3-orchestration.url="http://127.0.0.1/mcp/orchestration"'],
+        "t3-code",
+      ),
+      false,
+    );
+    NodeAssert.equal(
+      hasConfiguredMcpServer(
+        ["-c", 'mcp_servers.t3-orchestration.url="http://127.0.0.1/mcp/orchestration"'],
+        "t3-orchestration",
+      ),
       true,
     );
   });

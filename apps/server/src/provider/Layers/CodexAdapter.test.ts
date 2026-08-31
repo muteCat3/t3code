@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -37,6 +38,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import * as OrchestrationMcpProviderSession from "../../mcp/OrchestrationMcpProviderSession.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
@@ -290,6 +292,9 @@ validationLayer("CodexAdapterLive validation", (it) => {
         cwd: process.cwd(),
         launchArgs: "",
         model: "gpt-5.3-codex",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
+          { id: "serviceTier", value: "priority" },
+        ]),
         providerInstanceId: ProviderInstanceId.make("codex"),
         serviceTier: "priority",
         threadId: asThreadId("thread-1"),
@@ -435,6 +440,45 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       NodeAssert.equal(runtime.options.launchArgs, "--strict-config --enable foo");
     }).pipe(Effect.provide(layer));
   });
+
+  it.effect("attaches the isolated orchestration MCP server with its own bearer variable", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-orchestration-mcp");
+      OrchestrationMcpProviderSession.setOrchestrationMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-1"),
+        threadId,
+        providerSessionId: "orchestration-session-1",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:43123/mcp/orchestration",
+        authorizationHeader: "Bearer orchestration-secret",
+      });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() =>
+          OrchestrationMcpProviderSession.clearOrchestrationMcpProviderSession(threadId),
+        ),
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(
+        runtime.options.environment?.T3_ORCHESTRATION_MCP_BEARER_TOKEN,
+        "orchestration-secret",
+      );
+      NodeAssert.deepStrictEqual(runtime.options.appServerArgs, [
+        "-c",
+        "mcp_servers.t3-orchestration.url=http://127.0.0.1:43123/mcp/orchestration",
+        "-c",
+        'mcp_servers.t3-orchestration.bearer_token_env_var="T3_ORCHESTRATION_MCP_BEARER_TOKEN"',
+      ]);
+    }),
+  );
 
   it.effect("uses T3CODE_CODEX_LAUNCH_ARGS for the session runtime", () => {
     const runtimeFactory = makeRuntimeFactory();

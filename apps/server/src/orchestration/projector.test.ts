@@ -76,6 +76,7 @@ describe("orchestration projector", () => {
       {
         id: "thread-1",
         projectId: "project-1",
+        agentParentThreadId: null,
         title: "demo",
         modelSelection: {
           instanceId: "codex",
@@ -102,6 +103,97 @@ describe("orchestration projector", () => {
         session: null,
       },
     ]);
+  });
+
+  it("defaults legacy projects to untrusted and preserves absent trust updates", async () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const created = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(now),
+        makeEvent({
+          sequence: 1,
+          type: "project.created",
+          aggregateKind: "project",
+          aggregateId: "project-1",
+          occurredAt: now,
+          commandId: "cmd-project-create",
+          payload: {
+            projectId: "project-1",
+            title: "demo",
+            workspaceRoot: "/tmp/demo",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+    expect(created.projects[0]?.agentOrchestrationTrusted).toBe(false);
+
+    const trusted = await Effect.runPromise(
+      projectEvent(
+        created,
+        makeEvent({
+          sequence: 2,
+          type: "project.meta-updated",
+          aggregateKind: "project",
+          aggregateId: "project-1",
+          occurredAt: now,
+          commandId: "cmd-trust",
+          payload: {
+            projectId: "project-1",
+            agentOrchestrationTrusted: true,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+    const renamed = await Effect.runPromise(
+      projectEvent(
+        trusted,
+        makeEvent({
+          sequence: 3,
+          type: "project.meta-updated",
+          aggregateKind: "project",
+          aggregateId: "project-1",
+          occurredAt: now,
+          commandId: "cmd-rename",
+          payload: { projectId: "project-1", title: "renamed", updatedAt: now },
+        }),
+      ),
+    );
+    expect(renamed.projects[0]?.agentOrchestrationTrusted).toBe(true);
+  });
+
+  it("stamps child lineage only from thread.created", async () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const next = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(now),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-child",
+          occurredAt: now,
+          commandId: "cmd-thread-create",
+          payload: {
+            threadId: "thread-child",
+            projectId: "project-1",
+            agentParentThreadId: "thread-root",
+            title: "child",
+            modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+    expect(next.threads[0]?.agentParentThreadId).toBe("thread-root");
   });
 
   it("fails when event payload cannot be decoded by runtime schema", async () => {

@@ -40,7 +40,14 @@ export const ProviderSession = Schema.Struct({
   status: ProviderSessionStatus,
   runtimeMode: RuntimeMode,
   cwd: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * Legacy applied-model field retained while persisted/runtime producers move
+   * to the explicit requested/applied/provider-reported identity triplet.
+   */
   model: Schema.optional(TrimmedNonEmptyString),
+  requestedModelSelection: Schema.optional(ModelSelection),
+  appliedModelSelection: Schema.optional(ModelSelection),
+  providerReportedModelId: Schema.optional(TrimmedNonEmptyString),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
   activeTurnId: Schema.optional(TurnId),

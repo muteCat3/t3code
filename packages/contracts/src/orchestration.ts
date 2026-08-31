@@ -3,7 +3,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Struct from "effect/Struct";
-import { ProviderOptionSelections } from "./model.ts";
+import { ProviderOptionSelection, ProviderOptionSelections } from "./model.ts";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import {
   ApprovalRequestId,
@@ -22,7 +22,7 @@ import {
   TrimmedString,
   TurnId,
 } from "./baseSchemas.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -288,6 +288,8 @@ export const OrchestrationProject = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
+  // Absent on older snapshots means false.
+  agentOrchestrationTrusted: Schema.optional(Schema.Boolean),
   // Per-project override for where new threads start. Null/absent means
   // "no override": clients fall back to t3.json, then the global setting.
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
@@ -353,6 +355,9 @@ export const OrchestrationSession = Schema.Struct({
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
+  requestedModelSelection: Schema.optional(ModelSelection),
+  appliedModelSelection: Schema.optional(ModelSelection),
+  providerReportedModelId: Schema.optional(TrimmedNonEmptyString),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
   updatedAt: IsoDateTime,
@@ -437,6 +442,8 @@ export type ThreadLinkedPullRequest = typeof ThreadLinkedPullRequest.Type;
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
+  // Absent on older snapshots means a top-level thread.
+  agentParentThreadId: Schema.optional(Schema.NullOr(ThreadId)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -501,6 +508,7 @@ export const OrchestrationProjectShell = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
+  agentOrchestrationTrusted: Schema.optional(Schema.Boolean),
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   // Optional on the wire so cached snapshots from older servers still decode.
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
@@ -513,6 +521,7 @@ export type OrchestrationProjectShell = typeof OrchestrationProjectShell.Type;
 export const OrchestrationThreadShell = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
+  agentParentThreadId: Schema.optional(Schema.NullOr(ThreadId)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -701,6 +710,186 @@ export const OrchestrationThreadDetailSnapshot = Schema.Struct({
 });
 export type OrchestrationThreadDetailSnapshot = typeof OrchestrationThreadDetailSnapshot.Type;
 
+export const AgentTarget = Schema.Union([
+  Schema.Struct({ instanceId: ProviderInstanceId }),
+  Schema.Struct({ driver: ProviderDriverKind }),
+]);
+export type AgentTarget = typeof AgentTarget.Type;
+
+export const AgentIsolation = Schema.Literals(["shared", "managed-worktree"]);
+export type AgentIsolation = typeof AgentIsolation.Type;
+
+export const AgentSpawnInput = Schema.Struct({
+  target: AgentTarget,
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
+  brief: TrimmedNonEmptyString,
+  isolation: AgentIsolation,
+  interactionMode: Schema.Literals(["plan", "default"]),
+});
+export type AgentSpawnInput = typeof AgentSpawnInput.Type;
+
+export const AgentChildInput = Schema.Struct({ threadId: ThreadId });
+export type AgentChildInput = typeof AgentChildInput.Type;
+
+export const AgentSendInput = Schema.Struct({
+  threadId: ThreadId,
+  brief: TrimmedNonEmptyString,
+});
+export type AgentSendInput = typeof AgentSendInput.Type;
+
+export const AgentWaitInput = Schema.Struct({
+  threadId: ThreadId,
+  cursor: Schema.optional(TrimmedNonEmptyString),
+  timeoutMs: Schema.optional(PositiveInt),
+});
+export type AgentWaitInput = typeof AgentWaitInput.Type;
+
+const AgentRespondInputWire = Schema.Union([
+  Schema.Struct({
+    threadId: ThreadId,
+    kind: Schema.Literal("approval"),
+    requestId: ApprovalRequestId,
+    decision: ProviderApprovalDecision,
+  }),
+  Schema.Struct({
+    threadId: ThreadId,
+    kind: Schema.Literal("user-input"),
+    requestId: ApprovalRequestId,
+    answers: ProviderUserInputAnswers,
+  }),
+]);
+
+const AgentRespondInputSource = Schema.Struct({
+  threadId: ThreadId,
+  kind: Schema.Literals(["approval", "user-input"]),
+  requestId: ApprovalRequestId,
+  decision: Schema.optional(ProviderApprovalDecision),
+  answers: Schema.optional(ProviderUserInputAnswers),
+}).check(
+  Schema.makeFilter((input) => {
+    if (input.kind === "approval") {
+      return input.decision !== undefined && input.answers === undefined
+        ? true
+        : "approval responses require decision and do not accept answers";
+    }
+    return input.answers !== undefined && input.decision === undefined
+      ? true
+      : "user-input responses require answers and do not accept decision";
+  }),
+);
+
+/**
+ * A discriminated response at runtime, published as a top-level JSON object
+ * for MCP providers that do not accept union schemas at the parameter root.
+ */
+export const AgentRespondInput = AgentRespondInputSource.pipe(
+  Schema.decodeTo(
+    AgentRespondInputWire,
+    SchemaTransformation.transformOrFail({
+      decode: (input) =>
+        Effect.succeed(
+          (input.kind === "approval"
+            ? {
+                threadId: input.threadId,
+                kind: input.kind,
+                requestId: input.requestId,
+                decision: input.decision!,
+              }
+            : {
+                threadId: input.threadId,
+                kind: input.kind,
+                requestId: input.requestId,
+                answers: input.answers!,
+              }) as typeof AgentRespondInputWire.Encoded,
+        ),
+      encode: (input) => Effect.succeed(input as typeof AgentRespondInputSource.Type),
+    }),
+  ),
+);
+export type AgentRespondInput = typeof AgentRespondInput.Type;
+
+export const AgentChildStatus = Schema.Literals([
+  "running",
+  "waiting",
+  "idle",
+  "failed",
+  "interrupted",
+  "completed",
+]);
+export type AgentChildStatus = typeof AgentChildStatus.Type;
+
+export const AgentPendingRequest = Schema.Struct({
+  kind: Schema.Literals(["approval", "user-input"]),
+  requestId: ApprovalRequestId,
+  payload: Schema.Unknown,
+});
+export type AgentPendingRequest = typeof AgentPendingRequest.Type;
+
+export const AgentChildSnapshot = Schema.Struct({
+  threadId: ThreadId,
+  title: TrimmedNonEmptyString,
+  status: AgentChildStatus,
+  cursor: TrimmedNonEmptyString,
+  modelSelection: ModelSelection,
+  pendingRequests: Schema.Array(AgentPendingRequest),
+  latestAssistantText: Schema.optional(Schema.String),
+  error: Schema.optional(TrimmedNonEmptyString),
+});
+export type AgentChildSnapshot = typeof AgentChildSnapshot.Type;
+
+export const AgentSpawnResult = Schema.Struct({ child: AgentChildSnapshot });
+export type AgentSpawnResult = typeof AgentSpawnResult.Type;
+export const AgentInspectResult = AgentSpawnResult;
+export type AgentInspectResult = typeof AgentInspectResult.Type;
+export const AgentSendResult = AgentSpawnResult;
+export type AgentSendResult = typeof AgentSendResult.Type;
+export const AgentWaitResult = Schema.Struct({
+  child: AgentChildSnapshot,
+  timedOut: Schema.Boolean,
+});
+export type AgentWaitResult = typeof AgentWaitResult.Type;
+export const AgentRespondResult = AgentSpawnResult;
+export type AgentRespondResult = typeof AgentRespondResult.Type;
+export const AgentInterruptResult = AgentSpawnResult;
+export type AgentInterruptResult = typeof AgentInterruptResult.Type;
+export const AgentArchiveResult = AgentSpawnResult;
+export type AgentArchiveResult = typeof AgentArchiveResult.Type;
+export const AgentUnarchiveResult = AgentSpawnResult;
+export type AgentUnarchiveResult = typeof AgentUnarchiveResult.Type;
+
+export const AgentOrchestrationErrorCode = Schema.Literals([
+  "unavailable",
+  "forbidden",
+  "not_found",
+  "invalid_target",
+  "ambiguous_target",
+  "invalid_model",
+  "invalid_options",
+  "invalid_state",
+  "bootstrap_failed",
+  "drain_timeout",
+]);
+export type AgentOrchestrationErrorCode = typeof AgentOrchestrationErrorCode.Type;
+
+export class AgentOrchestrationError extends Schema.TaggedErrorClass<AgentOrchestrationError>()(
+  "AgentOrchestrationError",
+  {
+    code: AgentOrchestrationErrorCode,
+    message: TrimmedNonEmptyString,
+    childThreadId: Schema.optional(ThreadId),
+    candidates: Schema.optional(
+      Schema.Array(
+        Schema.Struct({
+          instanceId: ProviderInstanceId,
+          driver: ProviderDriverKind,
+          displayName: Schema.optional(TrimmedNonEmptyString),
+        }),
+      ),
+    ),
+  },
+) {}
+
 export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
   commandId: CommandId,
@@ -719,6 +908,8 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+  // Absent = leave unchanged. Trust is never inferred from another update.
+  agentOrchestrationTrusted: Schema.optional(Schema.Boolean),
   // Absent = leave unchanged; null = clear the override.
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
@@ -733,6 +924,25 @@ const ProjectDeleteCommand = Schema.Struct({
 });
 
 const ThreadCreateCommand = Schema.Struct({
+  type: Schema.Literal("thread.create"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  projectId: ProjectId,
+  agentParentThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  title: TrimmedNonEmptyString,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
+  ),
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+});
+
+// Client form deliberately omits server-owned child lineage. Struct decoding
+// strips an attempted field before the command reaches orchestration.
+const ClientThreadCreateCommand = Schema.Struct({
   type: Schema.Literal("thread.create"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -867,6 +1077,8 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
 
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   projectId: ProjectId,
+  // Server-owned bootstrap lineage. Absent keeps older bootstraps top-level.
+  agentParentThreadId: Schema.optional(Schema.NullOr(ThreadId)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -885,6 +1097,23 @@ const ThreadTurnStartBootstrapPrepareWorktree = Schema.Struct({
 
 const ThreadTurnStartBootstrap = Schema.Struct({
   createThread: Schema.optional(ThreadTurnStartBootstrapCreateThread),
+  prepareWorktree: Schema.optional(ThreadTurnStartBootstrapPrepareWorktree),
+  runSetupScript: Schema.optional(Schema.Boolean),
+});
+
+const ClientThreadTurnStartBootstrapCreateThread = Schema.Struct({
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+});
+
+const ClientThreadTurnStartBootstrap = Schema.Struct({
+  createThread: Schema.optional(ClientThreadTurnStartBootstrapCreateThread),
   prepareWorktree: Schema.optional(ThreadTurnStartBootstrapPrepareWorktree),
   runSetupScript: Schema.optional(Schema.Boolean),
 });
@@ -926,7 +1155,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
-  bootstrap: Schema.optional(ThreadTurnStartBootstrap),
+  bootstrap: Schema.optional(ClientThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   createdAt: IsoDateTime,
 });
@@ -1010,7 +1239,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
-  ThreadCreateCommand,
+  ClientThreadCreateCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
@@ -1180,6 +1409,7 @@ export const ProjectMetaUpdatedPayload = Schema.Struct({
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+  agentOrchestrationTrusted: Schema.optional(Schema.Boolean),
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
@@ -1194,6 +1424,8 @@ export const ProjectDeletedPayload = Schema.Struct({
 export const ThreadCreatedPayload = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
+  // Immutable lineage is stamped only by thread.created. Older events are roots.
+  agentParentThreadId: Schema.optional(Schema.NullOr(ThreadId)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),

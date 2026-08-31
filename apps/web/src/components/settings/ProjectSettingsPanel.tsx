@@ -95,6 +95,7 @@ import {
 } from "../ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SidebarInset } from "../ui/sidebar";
+import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -364,6 +365,7 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
         title: string;
         defaultModelSelection: ModelSelection | null;
         defaultThreadEnvMode: ThreadEnvMode | null;
+        agentOrchestrationTrusted: boolean;
         faviconPath: string | null;
       }>,
       failureTitle: string,
@@ -447,6 +449,51 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
         "Failed to update new-thread workspace",
       ),
     [updateAllMembers],
+  );
+
+  // ----- agent orchestration trust -----
+  const agentOrchestrationTrusted = group.memberProjects.every(
+    (member) => member.agentOrchestrationTrusted,
+  );
+  const visibleAgentChildren = useMemo(() => {
+    const memberKeys = new Set(
+      group.memberProjects.map((member) => `${member.environmentId}:${member.id}`),
+    );
+    return threads.filter(
+      (thread) =>
+        thread.agentParentThreadId != null &&
+        thread.archivedAt === null &&
+        memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
+    );
+  }, [group.memberProjects, threads]);
+  const setAgentOrchestrationTrusted = useCallback(
+    async (trusted: boolean) => {
+      if (!trusted) {
+        const api = readLocalApi();
+        if (!api) return;
+        const confirmed = await settlePromise(() =>
+          api.dialogs.confirm(
+            [
+              `Turn off agent orchestration for "${group.displayName}"?`,
+              ...(visibleAgentChildren.length > 0
+                ? [
+                    `${visibleAgentChildren.length} visible direct child ${visibleAgentChildren.length === 1 ? "thread" : "threads"} will be stopped and settled if active:`,
+                    ...visibleAgentChildren.map((child) => `- ${child.title}`),
+                  ]
+                : ["Any active direct child agents will be stopped and settled."]),
+              "Existing child threads stay visible and can be archived normally.",
+            ].join("\n"),
+            { variant: "destructive" },
+          ),
+        );
+        if (confirmed._tag === "Failure" || !confirmed.value) return;
+      }
+      await updateAllMembers(
+        { agentOrchestrationTrusted: trusted },
+        "Failed to update agent orchestration trust",
+      );
+    },
+    [group.displayName, updateAllMembers, visibleAgentChildren],
   );
 
   // ----- favicon -----
@@ -924,6 +971,22 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
                   <SelectItem value="local">{resolveEnvModeLabel("local")}</SelectItem>
                 </SelectPopup>
               </Select>
+            }
+          />
+          <SettingsRow
+            id="agent-orchestration"
+            title="Agent orchestration"
+            description={
+              agentOrchestrationTrusted
+                ? "Trusted Codex Root threads can delegate to durable child agents. Turning this off revokes access immediately."
+                : "Allow trusted Codex Root threads to delegate to durable child agents. Off by default; enabling takes effect on the next Root turn."
+            }
+            control={
+              <Switch
+                aria-label="Allow agent orchestration"
+                checked={agentOrchestrationTrusted}
+                onCheckedChange={(checked) => void setAgentOrchestrationTrusted(checked)}
+              />
             }
           />
         </SettingsSection>

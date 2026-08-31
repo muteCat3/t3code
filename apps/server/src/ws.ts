@@ -3,6 +3,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -101,6 +102,16 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as OrchestrationMcpSessionRegistry from "./mcp/OrchestrationMcpSessionRegistry.ts";
+import {
+  acquireActiveParentArchive,
+  acquireActiveRootMutation,
+  clearRootSessionPendingOrchestrationRefresh,
+  cleanupActiveDisabledProject,
+  dispatchBootstrapTurnStartCore,
+  isRootSessionPendingOrchestrationRefresh,
+  markRootSessionPendingOrchestrationRefresh,
+} from "./agentOrchestration/AgentOrchestrationBackendLive.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
@@ -893,25 +904,6 @@ const makeWsRpcLayer = (
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> =>
         Effect.gen(function* () {
           const bootstrap = command.bootstrap;
-          const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
-          let createdThread = false;
-          let targetProjectId = bootstrap?.createThread?.projectId;
-          let targetProjectCwd = bootstrap?.prepareWorktree?.projectCwd;
-          let targetWorktreePath = bootstrap?.createThread?.worktreePath ?? null;
-
-          const cleanupCreatedThread = () =>
-            createdThread
-              ? serverCommandId("bootstrap-thread-delete").pipe(
-                  Effect.flatMap((commandId) =>
-                    dispatchFromClient({
-                      type: "thread.delete",
-                      commandId,
-                      threadId: command.threadId,
-                    }),
-                  ),
-                  Effect.as(true),
-                )
-              : Effect.succeed(false);
 
           const recordSetupScriptLaunchFailure = (input: {
             readonly error: ProjectSetupScriptRunner.ProjectSetupScriptRunnerError;
@@ -990,19 +982,19 @@ const makeWsRpcLayer = (
               );
             });
 
-          const runSetupProgram = () =>
+          const runSetupProgram = (input: {
+            readonly projectId: ProjectId | undefined;
+            readonly projectCwd: string | undefined;
+            readonly worktreePath: string;
+          }) =>
             Effect.gen(function* () {
-              if (!bootstrap?.runSetupScript || !targetWorktreePath) {
-                return;
-              }
-              const worktreePath = targetWorktreePath;
               const requestedAt = yield* nowIso;
               yield* projectSetupScriptRunner
                 .runForThread({
                   threadId: command.threadId,
-                  ...(targetProjectId ? { projectId: targetProjectId } : {}),
-                  ...(targetProjectCwd ? { projectCwd: targetProjectCwd } : {}),
-                  worktreePath,
+                  ...(input.projectId ? { projectId: input.projectId } : {}),
+                  ...(input.projectCwd ? { projectCwd: input.projectCwd } : {}),
+                  worktreePath: input.worktreePath,
                 })
                 .pipe(
                   Effect.matchEffect({
@@ -1010,7 +1002,7 @@ const makeWsRpcLayer = (
                       recordSetupScriptLaunchFailure({
                         error,
                         requestedAt,
-                        worktreePath,
+                        worktreePath: input.worktreePath,
                       }),
                     onSuccess: (setupResult) => {
                       if (setupResult.status !== "started") {
@@ -1018,7 +1010,7 @@ const makeWsRpcLayer = (
                       }
                       return recordSetupScriptStarted({
                         requestedAt,
-                        worktreePath,
+                        worktreePath: input.worktreePath,
                         scriptId: setupResult.scriptId,
                         scriptName: setupResult.scriptName,
                         terminalId: setupResult.terminalId,
@@ -1028,102 +1020,77 @@ const makeWsRpcLayer = (
                 );
             });
 
-          const bootstrapProgram = Effect.gen(function* () {
-            if (bootstrap?.createThread) {
-              const created = yield* dispatchFromClient({
-                type: "thread.create",
-                commandId: yield* serverCommandId("bootstrap-thread-create"),
-                threadId: command.threadId,
-                projectId: bootstrap.createThread.projectId,
-                title: bootstrap.createThread.title,
-                modelSelection: bootstrap.createThread.modelSelection,
-                runtimeMode: bootstrap.createThread.runtimeMode,
-                interactionMode: bootstrap.createThread.interactionMode,
-                branch: bootstrap.createThread.branch,
-                worktreePath: bootstrap.createThread.worktreePath,
-                createdAt: bootstrap.createThread.createdAt,
-              });
-              // The successful create is a fence in the engine command queue:
-              // every delete for the prior incarnation committed before it.
-              // Drain through that event before setup or turn start can own
-              // terminals and provider sessions under the reused thread id.
-              yield* threadDeletionReactor.drainThrough(created.sequence);
-              createdThread = true;
-            }
-
-            if (bootstrap?.prepareWorktree) {
-              let worktreeBaseRef = bootstrap.prepareWorktree.baseBranch;
-              // "Start from origin" is a stored default; repos without an
-              // origin remote fall back to the local base branch instead of
-              // failing the whole bootstrap on `git fetch origin`.
-              const startFromOrigin =
-                bootstrap.prepareWorktree.startFromOrigin === true &&
-                (yield* gitWorkflow.remoteExists({
-                  cwd: bootstrap.prepareWorktree.projectCwd,
-                  remoteName: "origin",
-                }));
-              if (startFromOrigin) {
-                yield* gitWorkflow.fetchRemote({
-                  cwd: bootstrap.prepareWorktree.projectCwd,
-                  remoteName: "origin",
+          return yield* dispatchBootstrapTurnStartCore({
+            command,
+            makeCommandId: serverCommandId,
+            dispatch: (bootstrapCommand) =>
+              dispatchFromClient(bootstrapCommand).pipe(
+                Effect.mapError((cause) =>
+                  toDispatchCommandError(cause, "Failed to dispatch bootstrap command."),
+                ),
+              ),
+            drainThreadDeletionThrough: (sequence) =>
+              threadDeletionReactor
+                .drainThrough(sequence)
+                .pipe(
+                  Effect.mapError((cause) =>
+                    toDispatchCommandError(cause, "Failed to drain prior thread deletion."),
+                  ),
+                ),
+            prepareWorktree: (prepareWorktree) =>
+              Effect.gen(function* () {
+                let worktreeBaseRef = prepareWorktree.baseBranch;
+                // "Start from origin" is a stored default; repos without an
+                // origin remote fall back to the local base branch instead of
+                // failing the whole bootstrap on `git fetch origin`.
+                const startFromOrigin =
+                  prepareWorktree.startFromOrigin === true &&
+                  (yield* gitWorkflow.remoteExists({
+                    cwd: prepareWorktree.projectCwd,
+                    remoteName: "origin",
+                  }));
+                if (startFromOrigin) {
+                  yield* gitWorkflow.fetchRemote({
+                    cwd: prepareWorktree.projectCwd,
+                    remoteName: "origin",
+                  });
+                  const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
+                    cwd: prepareWorktree.projectCwd,
+                    refName: prepareWorktree.baseBranch,
+                    fallbackRemoteName: "origin",
+                  });
+                  worktreeBaseRef = resolvedRemoteBase.commitSha;
+                }
+                const worktree = yield* gitWorkflow.createWorktree({
+                  cwd: prepareWorktree.projectCwd,
+                  refName: worktreeBaseRef,
+                  newRefName: prepareWorktree.branch,
+                  baseRefName: prepareWorktree.baseBranch,
+                  path: null,
                 });
-                const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
-                  cwd: bootstrap.prepareWorktree.projectCwd,
-                  refName: bootstrap.prepareWorktree.baseBranch,
-                  fallbackRemoteName: "origin",
-                });
-                worktreeBaseRef = resolvedRemoteBase.commitSha;
-              }
-              const worktree = yield* gitWorkflow.createWorktree({
-                cwd: bootstrap.prepareWorktree.projectCwd,
-                refName: worktreeBaseRef,
-                newRefName: bootstrap.prepareWorktree.branch,
-                baseRefName: bootstrap.prepareWorktree.baseBranch,
-                path: null,
-              });
-              targetWorktreePath = worktree.worktree.path;
-              yield* dispatchFromClient({
-                type: "thread.meta.update",
-                commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
-                threadId: command.threadId,
-                branch: worktree.worktree.refName,
-                worktreePath: targetWorktreePath,
-              });
-              yield* refreshGitStatus(targetWorktreePath);
-            }
-
-            yield* runSetupProgram();
-
-            return yield* dispatchFromClient(finalTurnStartCommand);
-          });
-
-          return yield* bootstrapProgram.pipe(
-            Effect.catchCause((cause) => {
-              const dispatchError = toBootstrapDispatchCommandCauseError(cause);
-              if (Cause.hasInterruptsOnly(cause)) {
-                return Effect.fail(dispatchError);
-              }
-              return Effect.uninterruptible(cleanupCreatedThread()).pipe(
-                Effect.matchCauseEffect({
-                  onFailure: (cleanupCause) =>
-                    Effect.logWarning("bootstrap thread cleanup failed", {
-                      threadId: command.threadId,
-                      detail: Cause.pretty(cleanupCause),
-                    }).pipe(Effect.flatMap(() => Effect.fail(dispatchError))),
-                  onSuccess: (threadDeleted) =>
-                    Effect.fail(
-                      threadDeleted
-                        ? new OrchestrationDispatchCommandError({
-                            message: dispatchError.message,
-                            ...(dispatchError.cause !== undefined
-                              ? { cause: dispatchError.cause }
-                              : {}),
-                            bootstrapThreadDisposition: "deleted",
-                          })
-                        : dispatchError,
-                    ),
-                }),
+                return {
+                  branch: worktree.worktree.refName,
+                  worktreePath: worktree.worktree.path,
+                };
+              }).pipe(
+                Effect.mapError((cause) =>
+                  toDispatchCommandError(cause, "Failed to prepare bootstrap worktree."),
+                ),
+              ),
+            afterWorktreePrepared: refreshGitStatus,
+            runSetupScript: runSetupProgram,
+          }).pipe(
+            Effect.mapError((failure) => {
+              const dispatchError = toBootstrapDispatchCommandCauseError(
+                Cause.fail(failure.bootstrapCause),
               );
+              return failure.cleanupDisposition === "deleted"
+                ? new OrchestrationDispatchCommandError({
+                    message: dispatchError.message,
+                    ...(dispatchError.cause !== undefined ? { cause: dispatchError.cause } : {}),
+                    bootstrapThreadDisposition: "deleted",
+                  })
+                : dispatchError;
             }),
           );
         });
@@ -1237,7 +1204,7 @@ const makeWsRpcLayer = (
               // Best-effort on purpose: the user's archive/settle must not
               // fail because this cleanup read blipped, so a failed read
               // logs and skips the stop instead of propagating.
-              const shouldStopSessionAfterCommand = parkingCommand
+              let shouldStopSessionAfterCommand = parkingCommand
                 ? yield* projectionSnapshotQuery.getThreadShellById(parkingCommand.threadId).pipe(
                     Effect.map(
                       Option.match({
@@ -1254,9 +1221,174 @@ const makeWsRpcLayer = (
                     ),
                   )
                 : false;
-              const result = yield* dispatchNormalizedCommand(normalizedCommand).pipe(
+              if (parkingCommand?.type === "thread.archive") {
+                const parent = yield* projectionSnapshotQuery.getThreadShellById(
+                  parkingCommand.threadId,
+                );
+                if (Option.isSome(parent) && parent.value.agentParentThreadId == null) {
+                  // Parent archive is the one deliberately non-best-effort
+                  // cleanup path: a drain timeout leaves Root unarchived and
+                  // the child visible for diagnosis. This also runs after
+                  // trust-off because the old settled fleet stays visible.
+                  const readModel = yield* projectionSnapshotQuery.getCommandReadModel();
+                  const projectExists = readModel.projects.some(
+                    (project) => project.id === parent.value.projectId,
+                  );
+                  const hasDirectChildren = readModel.threads.some(
+                    (thread) => thread.agentParentThreadId === parkingCommand.threadId,
+                  );
+                  // An orphan shell with no project and no children cannot
+                  // admit a concurrent spawn. Every live project (including
+                  // trust-off) holds the mutation lease through final archive.
+                  if (projectExists || hasDirectChildren) {
+                    yield* OrchestrationMcpSessionRegistry.revokeActiveOrchestrationMcpThread(
+                      parkingCommand.threadId,
+                    );
+                    yield* Effect.acquireRelease(
+                      acquireActiveParentArchive(parkingCommand.threadId),
+                      (lease) => lease.release,
+                    );
+                    const latestParent = yield* projectionSnapshotQuery.getThreadShellById(
+                      parkingCommand.threadId,
+                    );
+                    shouldStopSessionAfterCommand = Option.isSome(latestParent)
+                      ? (latestParent.value.session !== null &&
+                          latestParent.value.session.status !== "stopped") ||
+                        latestParent.value.latestTurn?.state === "running"
+                      : shouldStopSessionAfterCommand;
+                  }
+                }
+              }
+              if (normalizedCommand.type === "thread.turn.start") {
+                const candidateRoot = yield* projectionSnapshotQuery.getThreadShellById(
+                  normalizedCommand.threadId,
+                );
+                if (
+                  Option.isSome(candidateRoot) &&
+                  candidateRoot.value.agentParentThreadId == null
+                ) {
+                  yield* Effect.acquireRelease(
+                    acquireActiveRootMutation(normalizedCommand.threadId),
+                    (lease) => lease.release,
+                  );
+                }
+              }
+              if (
+                normalizedCommand.type === "thread.turn.start" &&
+                (yield* isRootSessionPendingOrchestrationRefresh(normalizedCommand.threadId))
+              ) {
+                const root = yield* projectionSnapshotQuery.getThreadShellById(
+                  normalizedCommand.threadId,
+                );
+                if (
+                  Option.isSome(root) &&
+                  root.value.agentParentThreadId == null &&
+                  root.value.session !== null &&
+                  root.value.session.status !== "stopped"
+                ) {
+                  // Trust was enabled while the preceding turn was active.
+                  // Refresh only at the next turn boundary so active work is
+                  // never interrupted and the next process cannot reuse the
+                  // MCP-less provider session.
+                  const stopCommand = yield* normalizeDispatchCommand({
+                    type: "thread.session.stop",
+                    commandId: yield* serverCommandId("trust-on-next-turn-session-stop"),
+                    threadId: normalizedCommand.threadId,
+                    createdAt: yield* nowIso,
+                  });
+                  yield* dispatchNormalizedCommand(stopCommand);
+                }
+                yield* clearRootSessionPendingOrchestrationRefresh(normalizedCommand.threadId);
+              }
+              let trustEnableRootIds: ReadonlyArray<ThreadId> = [];
+              if (
+                normalizedCommand.type === "project.meta.update" &&
+                normalizedCommand.agentOrchestrationTrusted === true
+              ) {
+                const before = yield* projectionSnapshotQuery.getCommandReadModel();
+                const project = before.projects.find(
+                  (candidate) => candidate.id === normalizedCommand.projectId,
+                );
+                if (project !== undefined && project.agentOrchestrationTrusted !== true) {
+                  trustEnableRootIds = before.threads
+                    .filter(
+                      (thread) =>
+                        thread.projectId === normalizedCommand.projectId &&
+                        thread.agentParentThreadId == null &&
+                        thread.archivedAt === null,
+                    )
+                    .map((thread) => thread.id)
+                    .sort();
+                }
+              }
+              const dispatchCommand = dispatchNormalizedCommand(normalizedCommand).pipe(
                 Effect.tapError(() => cleanupFailedUploadedAttachments(command, normalizedCommand)),
               );
+              const result = yield* trustEnableRootIds.length === 0
+                ? dispatchCommand
+                : Effect.scoped(
+                    Effect.gen(function* () {
+                      // Install the refresh marker and commit trust while
+                      // holding every existing Root's mutation lease. A turn
+                      // that committed before these leases is the old turn;
+                      // the next one cannot miss the marker after trust lands.
+                      yield* Effect.forEach(
+                        trustEnableRootIds,
+                        (threadId) =>
+                          Effect.acquireRelease(
+                            acquireActiveRootMutation(threadId),
+                            (lease) => lease.release,
+                          ),
+                        { concurrency: 1, discard: true },
+                      );
+                      yield* Effect.forEach(
+                        trustEnableRootIds,
+                        markRootSessionPendingOrchestrationRefresh,
+                        { discard: true },
+                      );
+                      return yield* dispatchCommand.pipe(
+                        Effect.onExit((exit) =>
+                          Exit.isFailure(exit)
+                            ? Effect.forEach(
+                                trustEnableRootIds,
+                                clearRootSessionPendingOrchestrationRefresh,
+                                { discard: true },
+                              )
+                            : Effect.void,
+                        ),
+                      );
+                    }),
+                  );
+              if (
+                normalizedCommand.type === "project.meta.update" &&
+                normalizedCommand.agentOrchestrationTrusted !== undefined
+              ) {
+                const snapshot = yield* projectionSnapshotQuery.getCommandReadModel();
+                const roots = snapshot.threads.filter(
+                  (thread) =>
+                    thread.projectId === normalizedCommand.projectId &&
+                    thread.agentParentThreadId == null &&
+                    thread.archivedAt === null,
+                );
+
+                if (normalizedCommand.agentOrchestrationTrusted === false) {
+                  // Revoke every Root credential before touching any child.
+                  // The registry also re-checks trust on each call, so a
+                  // request racing this transition cannot regain authority.
+                  yield* Effect.forEach(
+                    roots,
+                    (root) =>
+                      OrchestrationMcpSessionRegistry.revokeActiveOrchestrationMcpThread(
+                        root.id,
+                      ).pipe(Effect.andThen(clearRootSessionPendingOrchestrationRefresh(root.id))),
+                    { discard: true },
+                  );
+                  yield* Effect.forEach(roots, (root) => cleanupActiveDisabledProject(root.id), {
+                    concurrency: 1,
+                    discard: true,
+                  });
+                }
+              }
               yield* recordClientCommandAnalytics(normalizedCommand);
               if (parkingCommand) {
                 const parkingKind = parkingCommand.type === "thread.archive" ? "archive" : "settle";
@@ -1305,6 +1437,7 @@ const makeWsRpcLayer = (
               }
               return result;
             }).pipe(
+              Effect.scoped,
               Effect.mapError((cause) =>
                 isOrchestrationDispatchCommandError(cause)
                   ? cause

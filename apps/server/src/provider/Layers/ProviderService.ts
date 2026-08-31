@@ -58,6 +58,8 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import * as OrchestrationMcpProviderSession from "../../mcp/OrchestrationMcpProviderSession.ts";
+import * as OrchestrationMcpSessionRegistry from "../../mcp/OrchestrationMcpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
@@ -77,6 +79,8 @@ export interface ProviderServiceLiveOptions {
   readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
   /** Same seam as `issueMcpCredential`, for observing the deny path's revoke. */
   readonly revokeMcpCredential?: typeof McpSessionRegistry.revokeActiveMcpThread;
+  readonly issueOrchestrationMcpCredential?: typeof OrchestrationMcpSessionRegistry.issueActiveOrchestrationMcpCredential;
+  readonly revokeOrchestrationMcpCredential?: typeof OrchestrationMcpSessionRegistry.revokeActiveOrchestrationMcpThread;
 }
 
 type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["Service"]> =
@@ -231,6 +235,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
   const revokeMcpCredential =
     options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
+  const issueOrchestrationMcpCredential =
+    options?.issueOrchestrationMcpCredential ??
+    OrchestrationMcpSessionRegistry.issueActiveOrchestrationMcpCredential;
+  const revokeOrchestrationMcpCredential =
+    options?.revokeOrchestrationMcpCredential ??
+    OrchestrationMcpSessionRegistry.revokeActiveOrchestrationMcpThread;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   /**
@@ -259,7 +269,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
-  const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
+  const prepareMcpSession = (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+    provider: ProviderDriverKind,
+  ) =>
     Effect.gen(function* () {
       if (!(yield* agentBrowserAccessEnabled)) {
         // Revoke as well as clear. Every other prepare path reaches
@@ -270,17 +284,48 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         // model) re-prepares without stopping, so it relies on this.
         yield* revokeMcpCredential(threadId);
         yield* Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId));
-        return undefined;
+      } else {
+        const credential = yield* issueMcpCredential({ threadId, providerInstanceId });
+        if (credential) {
+          yield* Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config));
+        }
       }
-      const credential = yield* issueMcpCredential({ threadId, providerInstanceId });
-      if (credential) {
-        yield* Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config));
+
+      // Orchestration is a Codex Root capability. The registry's live
+      // projection-backed eligibility check additionally requires a trusted,
+      // unarchived, top-level thread and rejects children.
+      if (provider !== "codex") {
+        yield* revokeOrchestrationMcpCredential(threadId);
+        yield* Effect.sync(() =>
+          OrchestrationMcpProviderSession.clearOrchestrationMcpProviderSession(threadId),
+        );
+        return;
       }
-      return credential;
+      const orchestrationCredential = yield* issueOrchestrationMcpCredential({
+        threadId,
+        providerInstanceId,
+      });
+      if (orchestrationCredential) {
+        yield* Effect.sync(() =>
+          OrchestrationMcpProviderSession.setOrchestrationMcpProviderSession(
+            orchestrationCredential.config,
+          ),
+        );
+      } else {
+        yield* Effect.sync(() =>
+          OrchestrationMcpProviderSession.clearOrchestrationMcpProviderSession(threadId),
+        );
+      }
     });
   const clearMcpSession = (threadId: ThreadId) =>
-    McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
-      Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+    Effect.all([revokeMcpCredential(threadId), revokeOrchestrationMcpCredential(threadId)]).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          McpProviderSession.clearMcpProviderSession(threadId);
+          OrchestrationMcpProviderSession.clearOrchestrationMcpProviderSession(threadId);
+        }),
+      ),
+      Effect.asVoid,
     );
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
@@ -453,7 +498,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
-      yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+      yield* prepareMcpSession(input.binding.threadId, bindingInstanceId, input.binding.provider);
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -649,7 +694,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
-        yield* prepareMcpSession(threadId, resolvedInstanceId);
+        yield* prepareMcpSession(threadId, resolvedInstanceId, resolvedProvider);
         const session = yield* adapter
           .startSession({
             ...input,
@@ -783,6 +828,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       // rather than issuing a new one: sessions that go a long time between
       // browser tool calls used to lose the toolkit outright.
       yield* McpSessionRegistry.touchActiveMcpThread(input.threadId);
+      yield* OrchestrationMcpSessionRegistry.touchActiveOrchestrationMcpThread(input.threadId);
       const turn = yield* routed.adapter.sendTurn(input);
       yield* directory.upsert({
         threadId: input.threadId,
@@ -1180,7 +1226,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ).pipe(Effect.asVoid);
     yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
     yield* McpSessionRegistry.revokeAllActiveMcpCredentials();
+    yield* OrchestrationMcpSessionRegistry.revokeAllActiveOrchestrationMcpCredentials();
     McpProviderSession.clearAllMcpProviderSessions();
+    OrchestrationMcpProviderSession.clearAllOrchestrationMcpProviderSessions();
     const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) =>
       Effect.gen(function* () {

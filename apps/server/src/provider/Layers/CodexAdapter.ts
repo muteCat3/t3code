@@ -42,6 +42,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as OrchestrationMcpProviderSession from "../../mcp/OrchestrationMcpProviderSession.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -1684,6 +1685,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const orchestrationMcpSession =
+          OrchestrationMcpProviderSession.readOrchestrationMcpProviderSession(input.threadId);
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -1697,20 +1700,45 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : {}),
           runtimeMode: input.runtimeMode,
           ...(input.modelSelection?.instanceId === boundInstanceId
-            ? { model: input.modelSelection.model }
+            ? { model: input.modelSelection.model, modelSelection: input.modelSelection }
             : {}),
           ...(serviceTier ? { serviceTier } : {}),
-          ...(mcpSession
+          ...(mcpSession || orchestrationMcpSession
             ? {
                 environment: {
                   ...(options?.environment ?? process.env),
-                  T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
+                  ...(mcpSession
+                    ? {
+                        T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(
+                          /^Bearer\s+/,
+                          "",
+                        ),
+                      }
+                    : {}),
+                  ...(orchestrationMcpSession
+                    ? {
+                        T3_ORCHESTRATION_MCP_BEARER_TOKEN:
+                          orchestrationMcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
+                      }
+                    : {}),
                 },
                 appServerArgs: [
-                  "-c",
-                  `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
-                  "-c",
-                  'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+                  ...(mcpSession
+                    ? [
+                        "-c",
+                        `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
+                        "-c",
+                        'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+                      ]
+                    : []),
+                  ...(orchestrationMcpSession
+                    ? [
+                        "-c",
+                        `mcp_servers.t3-orchestration.url=${orchestrationMcpSession.endpoint}`,
+                        "-c",
+                        'mcp_servers.t3-orchestration.bearer_token_env_var="T3_ORCHESTRATION_MCP_BEARER_TOKEN"',
+                      ]
+                    : []),
                 ],
               }
             : {}),

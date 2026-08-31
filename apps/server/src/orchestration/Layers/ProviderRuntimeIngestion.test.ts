@@ -289,6 +289,7 @@ describe("ProviderRuntimeIngestion", () => {
       },
       interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
       runtimeMode: "approval-required",
+      agentParentThreadId: null,
       branch: null,
       worktreePath: null,
       createdAt,
@@ -367,6 +368,86 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
+  });
+
+  it("projects provider identity learned after startup and later Codex reroutes", async () => {
+    const harness = await createHarness();
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.6-sol",
+    };
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "ready",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      requestedModelSelection: modelSelection,
+      appliedModelSelection: modelSelection,
+      providerReportedModelId: "gpt-5.6-sol",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z",
+    });
+    harness.emit({
+      type: "session.configured",
+      eventId: asEventId("evt-session-configured-identity"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: { config: {} },
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.providerReportedModelId === "gpt-5.6-sol",
+    );
+
+    harness.emit({
+      type: "session.state.changed",
+      eventId: asEventId("evt-session-running-after-identity"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:01.500Z",
+      payload: { state: "running", reason: "turn started" },
+    });
+    const running = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.providerReportedModelId === "gpt-5.6-sol",
+    );
+    expect(running.session?.appliedModelSelection).toEqual(modelSelection);
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      requestedModelSelection: modelSelection,
+      appliedModelSelection: modelSelection,
+      providerReportedModelId: "gpt-5.6-terra",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:02.000Z",
+    });
+    harness.emit({
+      type: "model.rerouted",
+      eventId: asEventId("evt-model-rerouted-identity"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: {
+        fromModel: "gpt-5.6-sol",
+        toModel: "gpt-5.6-terra",
+        reason: "capacity",
+      },
+    });
+
+    const rerouted = await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.providerReportedModelId === "gpt-5.6-terra",
+    );
+    expect(rerouted.session?.appliedModelSelection).toEqual(modelSelection);
   });
 
   it("applies provider session.state.changed transitions directly", async () => {

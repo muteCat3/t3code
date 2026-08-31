@@ -9,6 +9,7 @@ import {
   type ProviderApprovalOption,
   type ProviderEvent,
   type ProviderInteractionMode,
+  type ModelSelection,
   type ProviderRequestKind,
   type ProviderSession,
   type ProviderTurnStartResult,
@@ -62,8 +63,12 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "no rollout found",
 ];
 
-export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
-  return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
+export function hasConfiguredMcpServer(
+  appServerArgs: ReadonlyArray<string> | undefined,
+  serverName?: string,
+): boolean {
+  const marker = serverName ? `mcp_servers.${serverName}.` : "mcp_servers.";
+  return appServerArgs?.some((argument) => argument.includes(marker)) === true;
 }
 
 export const CodexResumeCursorSchema = Schema.Struct({
@@ -163,6 +168,7 @@ export interface CodexSessionRuntimeOptions {
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
+  readonly modelSelection?: ModelSelection;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
@@ -569,6 +575,7 @@ function buildCodexCollaborationMode(input: {
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly browserToolsAvailable?: boolean;
+  readonly orchestrationToolsAvailable?: boolean;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
@@ -584,6 +591,7 @@ function buildCodexCollaborationMode(input: {
         input.interactionMode,
         { model, reasoningEffort },
         input.browserToolsAvailable ?? true,
+        input.orchestrationToolsAvailable ?? false,
       ),
     },
   };
@@ -603,6 +611,7 @@ export function buildTurnStartParams(input: {
   readonly interactionMode?: ProviderInteractionMode;
   /** Defaults to true so callers that predate the agent-access gate are unchanged. */
   readonly browserToolsAvailable?: boolean;
+  readonly orchestrationToolsAvailable?: boolean;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -624,6 +633,7 @@ export function buildTurnStartParams(input: {
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
     browserToolsAvailable: input.browserToolsAvailable ?? true,
+    orchestrationToolsAvailable: input.orchestrationToolsAvailable ?? false,
   });
 
   return decodeCodexTurnStartParamsWithCollaborationMode({
@@ -1748,6 +1758,20 @@ export const makeCodexSessionRuntime = (
           return;
         }
 
+        const rootProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+        if (
+          notification.method === "model/rerouted" &&
+          notification.params.threadId === rootProviderThreadId
+        ) {
+          const reroutedModel = nonEmptyMetadataValue(notification.params.toModel);
+          if (reroutedModel) {
+            yield* updateSession(sessionRef, {
+              model: reroutedModel,
+              providerReportedModelId: reroutedModel,
+            });
+          }
+        }
+
         // Suppression applies to receiver-map children (v1) AND to any
         // conversation that is not the root thread. The live capture
         // (codexMultiAgentWire.json) shows a child's thread/status/changed
@@ -2251,6 +2275,20 @@ export const makeCodexSessionRuntime = (
         status: "ready",
         cwd: opened.cwd,
         model: opened.model,
+        ...(options.modelSelection
+          ? {
+              requestedModelSelection: options.modelSelection,
+            }
+          : {}),
+        ...(options.modelSelection
+          ? {
+              appliedModelSelection: {
+                ...options.modelSelection,
+                model: opened.model,
+              },
+            }
+          : {}),
+        providerReportedModelId: opened.model,
         resumeCursor: { threadId: providerThreadId },
         updatedAt: yield* nowIso,
       } satisfies ProviderSession;
@@ -2320,7 +2358,11 @@ export const makeCodexSessionRuntime = (
             // Derived from the session's own MCP configuration rather than the
             // setting, so the prompt describes the tools this turn actually
             // has even if the setting changed after the session started.
-            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs, "t3-code"),
+            orchestrationToolsAvailable: hasConfiguredMcpServer(
+              options.appServerArgs,
+              "t3-orchestration",
+            ),
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(

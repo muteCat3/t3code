@@ -4,6 +4,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
+import { McpServer } from "effect/unstable/ai";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
@@ -48,6 +49,10 @@ import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/Provide
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
+import * as OrchestrationMcpHttpServer from "./mcp/OrchestrationMcpHttpServer.ts";
+import * as OrchestrationMcpSessionRegistry from "./mcp/OrchestrationMcpSessionRegistry.ts";
+import { AgentToolkitHandlersLive } from "./mcp/toolkits/agents/handlers.ts";
+import { AgentToolkit } from "./mcp/toolkits/agents/tools.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
@@ -112,6 +117,12 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import {
+  AgentOrchestrationBackendLive,
+  AgentOrchestrationRuntimeBridgeLive,
+  OrchestrationMcpEligibilityLive,
+} from "./agentOrchestration/AgentOrchestrationBackendLive.ts";
+import { AgentOrchestrationService } from "./agentOrchestration/AgentOrchestrationService.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -270,6 +281,16 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
 );
 
+const AgentOrchestrationServiceLive = AgentOrchestrationService.layer.pipe(
+  Layer.provide(AgentOrchestrationBackendLive),
+);
+
+const AgentOrchestrationLayerLive = Layer.mergeAll(
+  AgentOrchestrationServiceLive,
+  OrchestrationMcpEligibilityLive,
+  AgentOrchestrationRuntimeBridgeLive.pipe(Layer.provide(AgentOrchestrationServiceLive)),
+);
+
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
 
 const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
@@ -374,7 +395,7 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(OrchestrationLayerLive),
 );
 
-const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+const RuntimeCoreDependenciesBaseLive = ReactorLayerLive.pipe(
   // Core Services
   Layer.provideMerge(ServerSettingsLayerLive),
   Layer.provideMerge(CheckpointingLayerLive),
@@ -426,6 +447,8 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   ),
 );
 
+const RuntimeCoreDependenciesLive = RuntimeCoreDependenciesBaseLive;
+
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
   Layer.provideMerge(BackgroundLayerLive),
@@ -455,6 +478,13 @@ const PullRequestServiceLive = PullRequestService.layer.pipe(
   Layer.provide(VcsProcess.layer),
 );
 
+const OrchestrationMcpLayerLive = McpServer.toolkit(AgentToolkit).pipe(
+  Layer.provide(AgentToolkitHandlersLive),
+  Layer.provideMerge(OrchestrationMcpHttpServer.OrchestrationMcpTransportLive),
+  Layer.provide(OrchestrationMcpSessionRegistry.layer),
+  Layer.provide(AgentOrchestrationLayerLive),
+);
+
 export const makeRoutesLayer = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -469,9 +499,10 @@ export const makeRoutesLayer = Layer.mergeAll(
     assetRouteLayer,
     attachmentUploadRouteLayer,
     staticAndDevRouteLayer,
-    websocketRpcRouteLayer,
+    websocketRpcRouteLayer.pipe(Layer.provide(AgentOrchestrationLayerLive)),
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
+  OrchestrationMcpLayerLive,
 ).pipe(
   // Both transports consume the same service instance, so caches single-flight across clients
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.

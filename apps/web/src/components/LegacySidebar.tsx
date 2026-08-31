@@ -81,11 +81,17 @@ import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform } from "../lib/utils";
 import {
   readThreadShell,
+  readThreadShells,
   useProject,
   useProjects,
   useThreadShells,
   useThreadShellsForProjectRefs,
 } from "../state/entities";
+import {
+  archiveThreadConfirmationMessage,
+  visibleDirectChildren,
+  visibleDirectChildCount,
+} from "../lib/agentOrchestrationUi";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
@@ -1829,9 +1835,21 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "archive") {
-        if (appSettingsConfirmThreadArchive) {
+        const currentThreads = readThreadShells();
+        const directChildren = selectedThreadEntries.flatMap(({ thread }) =>
+          visibleDirectChildren(thread, currentThreads),
+        );
+        if (appSettingsConfirmThreadArchive || directChildren.length > 0) {
           const confirmed = await api.dialogs.confirm(
-            `Archive ${count} thread${count === 1 ? "" : "s"}?`,
+            [
+              `Archive ${count} thread${count === 1 ? "" : "s"}?`,
+              ...(directChildren.length > 0
+                ? [
+                    `${directChildren.length} direct child ${directChildren.length === 1 ? "thread" : "threads"} will be interrupted, drained, and archived first:`,
+                    ...directChildren.map((child) => `- ${child.title}`),
+                  ]
+                : []),
+            ].join("\n"),
           );
           if (!confirmed) return;
         }
@@ -1996,6 +2014,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   const attemptArchiveThread = useCallback(
     async (threadRef: ScopedThreadRef) => {
+      const thread = readThreadShell(threadRef);
+      const currentThreads = readThreadShells();
+      if (thread && visibleDirectChildCount(thread, currentThreads) > 0) {
+        const api = readLocalApi();
+        if (!api) return;
+        const confirmed = await api.dialogs.confirm(
+          archiveThreadConfirmationMessage(thread, currentThreads),
+        );
+        if (!confirmed) return;
+      }
       const result = await archiveThread(threadRef);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);

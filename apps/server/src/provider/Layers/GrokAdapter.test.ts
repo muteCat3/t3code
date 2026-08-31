@@ -278,6 +278,64 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
     }),
   );
 
+  it.effect("rejects startup when Grok ACP omits currentModelId", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-missing-model-identity");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ T3_ACP_OMIT_SESSION_MODELS: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const error = yield* Effect.flip(
+        adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("grok"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("grok"),
+            model: "grok-build",
+          },
+        }),
+      );
+      assert.equal(error._tag, "ProviderAdapterValidationError");
+      assert.include(error.message, "currentModelId");
+      assert.isFalse(yield* adapter.hasSession(threadId));
+    }),
+  );
+
+  it.effect("rejects plan turns when Grok ACP advertises no interaction modes", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-missing-plan-mode");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ T3_ACP_OMIT_SESSION_MODES: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("grok"),
+          model: "grok-build",
+        },
+      });
+
+      const error = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId,
+          input: "plan this",
+          interactionMode: "plan",
+          attachments: [],
+        }),
+      );
+      assert.equal(error._tag, "ProviderAdapterValidationError");
+      assert.include(error.message, "compatible with 'plan'");
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("closes the ACP child process when a session stops", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-stop-session-close");

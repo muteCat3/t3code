@@ -536,6 +536,11 @@ function GeneralSettingsSection() {
   return (
     <SettingsSection title="General">
       <SettingsRow icon="folder" label="Project Grouping" target="SettingsProjectGrouping" />
+      <SettingsRow
+        icon="sparkles"
+        label="Agent Orchestration"
+        target="SettingsProjectOrchestration"
+      />
       <SettingsSwitchRow
         icon="arrow.triangle.branch"
         label="Auto-settle merged threads"

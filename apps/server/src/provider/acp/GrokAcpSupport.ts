@@ -1,4 +1,9 @@
-import { type GrokSettings, ProviderDriverKind, type RuntimeMode } from "@t3tools/contracts";
+import {
+  type GrokSettings,
+  ProviderDriverKind,
+  type ProviderInteractionMode,
+  type RuntimeMode,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -9,6 +14,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import { normalizeModelSlug } from "@t3tools/shared/model";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import type { AcpSessionModeState } from "./AcpRuntimeModel.ts";
 import { makeXAiPromptCompletionRuntime } from "./XAiAcpExtension.ts";
 
 const GROK_API_KEY_ENV = "XAI_API_KEY";
@@ -122,6 +128,50 @@ export function currentGrokModelIdFromSessionSetup(
     | EffectAcpSchema.ResumeSessionResponse,
 ): string | undefined {
   return sessionSetupResult.models?.currentModelId?.trim() || undefined;
+}
+
+const GROK_PLAN_MODE_TOKENS = new Set(["plan", "architect"]);
+const GROK_DEFAULT_MODE_TOKENS = new Set(["default", "code", "build", "agent"]);
+
+function normalizedModeToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
+
+/** Resolve T3's two interaction modes only through modes advertised by Grok. */
+export function resolveGrokAcpInteractionModeId(
+  modeState: AcpSessionModeState | undefined,
+  interactionMode: ProviderInteractionMode,
+): string | undefined {
+  if (!modeState) {
+    return undefined;
+  }
+  const acceptedTokens =
+    interactionMode === "plan" ? GROK_PLAN_MODE_TOKENS : GROK_DEFAULT_MODE_TOKENS;
+  return modeState.availableModes.find((mode) => {
+    const id = normalizedModeToken(mode.id);
+    const name = normalizedModeToken(mode.name);
+    return acceptedTokens.has(id) || acceptedTokens.has(name);
+  })?.id;
+}
+
+export function applyGrokAcpInteractionMode<E>(input: {
+  readonly runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "setMode">;
+  readonly modeState: AcpSessionModeState | undefined;
+  readonly interactionMode: ProviderInteractionMode;
+  readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
+  readonly unsupported: (interactionMode: ProviderInteractionMode) => E;
+}): Effect.Effect<string, E> {
+  const modeId = resolveGrokAcpInteractionModeId(input.modeState, input.interactionMode);
+  if (modeId === undefined) {
+    return Effect.fail(input.unsupported(input.interactionMode));
+  }
+  if (modeId === input.modeState?.currentModeId) {
+    return Effect.succeed(modeId);
+  }
+  return input.runtime.setMode(modeId).pipe(Effect.as(modeId), Effect.mapError(input.mapError));
 }
 
 export function currentGrokReasoningEffortFromSessionSetup(

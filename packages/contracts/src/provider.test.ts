@@ -225,6 +225,26 @@ describe("providerInstanceId routing key (slice-2 invariant)", () => {
     expect(session.providerInstanceId).toBe("codex_work");
   });
 
+  it("decodes explicit model identity while retaining the legacy model field", () => {
+    const session = decodeProviderSession({
+      provider: "codex",
+      providerInstanceId: "codex_work",
+      status: "ready",
+      runtimeMode: "full-access",
+      threadId: "thread-1",
+      model: "legacy-model",
+      requestedModelSelection: { instanceId: "codex_work", model: "requested-model" },
+      appliedModelSelection: { instanceId: "codex_work", model: "applied-model" },
+      providerReportedModelId: "reported-model",
+      createdAt: "2024-01-01T00:00:00Z",
+      updatedAt: "2024-01-01T00:00:00Z",
+    });
+    expect(session.model).toBe("legacy-model");
+    expect(session.requestedModelSelection?.model).toBe("requested-model");
+    expect(session.appliedModelSelection?.model).toBe("applied-model");
+    expect(session.providerReportedModelId).toBe("reported-model");
+  });
+
   it("decodes ProviderSession for fork-provided driver kinds", () => {
     const session = decodeProviderSession({
       provider: "ollama",

@@ -6,6 +6,8 @@ import * as Schema from "effect/Schema";
 import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
+  AgentRespondInput,
+  AgentSpawnInput,
   ClientOrchestrationCommand,
   ModelSelection,
   OrchestrationCommand,
@@ -14,6 +16,7 @@ import {
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetTurnDiffInput,
   OrchestrationLatestTurn,
+  OrchestrationProject,
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
@@ -47,6 +50,7 @@ const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
   ThreadTurnStartRequestedPayload,
 );
 const decodeOrchestrationLatestTurn = Schema.decodeUnknownEffect(OrchestrationLatestTurn);
+const decodeOrchestrationProject = Schema.decodeUnknownEffect(OrchestrationProject);
 const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(OrchestrationProposedPlan);
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
 const decodeOrchestrationThread = Schema.decodeUnknownEffect(OrchestrationThread);
@@ -64,6 +68,8 @@ const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationComma
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 const decodeDispatchCommandError = Schema.decodeUnknownEffect(OrchestrationDispatchCommandError);
+const decodeAgentSpawnInput = Schema.decodeUnknownEffect(AgentSpawnInput);
+const decodeAgentRespondInput = Schema.decodeUnknownEffect(AgentRespondInput);
 
 it.effect("decodes a dispatch error after its bootstrap thread was deleted", () =>
   Effect.gen(function* () {
@@ -178,6 +184,21 @@ it.effect("decodes project.create with createWorkspaceRootIfMissing enabled", ()
     });
 
     assert.strictEqual(parsed.createWorkspaceRootIfMissing, true);
+  }),
+);
+
+it.effect("strips attempted trust from project.create", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeProjectCreateCommand({
+      type: "project.create",
+      commandId: "cmd-project-create-trusted",
+      projectId: "project-1",
+      title: "Project Title",
+      workspaceRoot: "/tmp/workspace",
+      agentOrchestrationTrusted: true,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual("agentOrchestrationTrusted" in parsed, false);
   }),
 );
 
@@ -413,6 +434,7 @@ it.effect("accepts bootstrap metadata in thread.turn.start", () =>
       bootstrap: {
         createThread: {
           projectId: "project-1",
+          agentParentThreadId: "thread-root",
           title: "Bootstrap thread",
           modelSelection: {
             provider: "codex",
@@ -435,9 +457,108 @@ it.effect("accepts bootstrap metadata in thread.turn.start", () =>
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.bootstrap?.createThread?.projectId, "project-1");
+    assert.strictEqual(parsed.bootstrap?.createThread?.agentParentThreadId, "thread-root");
     assert.strictEqual(parsed.bootstrap?.prepareWorktree?.baseBranch, "main");
     assert.strictEqual(parsed.bootstrap?.prepareWorktree?.startFromOrigin, true);
     assert.strictEqual(parsed.bootstrap?.runSetupScript, true);
+  }),
+);
+
+it.effect("accepts legacy thread.turn.start bootstrap without child lineage", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeThreadTurnStartCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-bootstrap-legacy",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-bootstrap-legacy",
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      bootstrap: {
+        createThread: {
+          projectId: "project-1",
+          title: "Legacy bootstrap thread",
+          modelSelection: { provider: "codex", model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.bootstrap?.createThread?.agentParentThreadId, undefined);
+  }),
+);
+
+it.effect("strips server-owned lineage from client commands", () =>
+  Effect.gen(function* () {
+    const createInput = {
+      type: "thread.create",
+      commandId: "cmd-client-thread-create",
+      threadId: "thread-child",
+      projectId: "project-1",
+      agentParentThreadId: "thread-root",
+      title: "Child",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const clientCreate = yield* decodeClientOrchestrationCommand(createInput);
+    const serverCreate = yield* decodeOrchestrationCommand(createInput);
+    assert.strictEqual("agentParentThreadId" in clientCreate, false);
+    assert.strictEqual(
+      serverCreate.type === "thread.create" ? serverCreate.agentParentThreadId : null,
+      "thread-root",
+    );
+
+    const turnInput = {
+      type: "thread.turn.start",
+      commandId: "cmd-client-turn-bootstrap",
+      threadId: "thread-child",
+      message: {
+        messageId: "msg-client-turn-bootstrap",
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      bootstrap: {
+        createThread: {
+          projectId: "project-1",
+          agentParentThreadId: "thread-root",
+          title: "Child",
+          modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const clientTurn = yield* decodeClientOrchestrationCommand(turnInput);
+    const serverTurn = yield* decodeOrchestrationCommand(turnInput);
+    assert.strictEqual(
+      clientTurn.type === "thread.turn.start" && clientTurn.bootstrap?.createThread
+        ? "agentParentThreadId" in clientTurn.bootstrap.createThread
+        : true,
+      false,
+    );
+    assert.strictEqual(
+      serverTurn.type === "thread.turn.start"
+        ? serverTurn.bootstrap?.createThread?.agentParentThreadId
+        : null,
+      "thread-root",
+    );
   }),
 );
 
@@ -1110,3 +1231,88 @@ it("isProviderSendTurnSupportedImageMimeType accepts raster formats and rejects 
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("IMAGE/JPEG"), true);
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("image/svg+xml"), false);
 });
+
+it.effect("legacy project and thread snapshots decode without agent orchestration fields", () =>
+  Effect.gen(function* () {
+    const project = yield* decodeOrchestrationProject({
+      id: "project-1",
+      title: "Project",
+      workspaceRoot: "/tmp/project",
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      deletedAt: null,
+    });
+    assert.strictEqual(project.agentOrchestrationTrusted, undefined);
+
+    const threadPayload = yield* decodeThreadCreatedPayload({
+      threadId: "thread-1",
+      projectId: "project-1",
+      title: "Thread",
+      modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+      runtimeMode: "full-access",
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(threadPayload.agentParentThreadId, undefined);
+  }),
+);
+
+it.effect("agent tool inputs enforce provider-agnostic target and response unions", () =>
+  Effect.gen(function* () {
+    const spawn = yield* decodeAgentSpawnInput({
+      target: { driver: "grok" },
+      model: "grok-code-fast-1",
+      options: [{ id: "reasoningEffort", value: "high" }],
+      brief: "Implement the worker slice.",
+      isolation: "managed-worktree",
+      interactionMode: "default",
+    });
+    assert.strictEqual("driver" in spawn.target ? spawn.target.driver : null, "grok");
+
+    const response = yield* decodeAgentRespondInput({
+      threadId: "thread-child",
+      kind: "approval",
+      requestId: "request-1",
+      decision: "accept",
+    });
+    assert.strictEqual(response.kind, "approval");
+
+    const userInputResponse = yield* decodeAgentRespondInput({
+      threadId: "thread-child",
+      kind: "user-input",
+      requestId: "request-2",
+      answers: { framework: "effect" },
+    });
+    assert.strictEqual(userInputResponse.kind, "user-input");
+
+    const invalidResponses = [
+      {
+        threadId: "thread-child",
+        kind: "approval",
+        requestId: "request-3",
+        answers: { confirmation: true },
+      },
+      {
+        threadId: "thread-child",
+        kind: "user-input",
+        requestId: "request-4",
+        decision: "accept",
+      },
+      {
+        threadId: "thread-child",
+        kind: "approval",
+        requestId: "request-5",
+        decision: "accept",
+        answers: { confirmation: true },
+      },
+    ];
+    for (const invalid of invalidResponses) {
+      const result = yield* Effect.exit(decodeAgentRespondInput(invalid));
+      assert.strictEqual(result._tag, "Failure");
+    }
+  }),
+);

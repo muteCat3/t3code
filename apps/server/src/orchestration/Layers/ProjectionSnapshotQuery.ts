@@ -77,6 +77,7 @@ const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+    agentOrchestrationTrusted: Schema.Number,
     scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
   }),
 );
@@ -99,7 +100,12 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
-const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
+const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession.mapFields(
+  Struct.assign({
+    requestedModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+    appliedModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+  }),
+);
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
   Struct.assign({
     files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
@@ -306,6 +312,15 @@ function mapSessionRow(
     providerName: row.providerName,
     ...(row.providerInstanceId !== null ? { providerInstanceId: row.providerInstanceId } : {}),
     runtimeMode: row.runtimeMode,
+    ...(row.requestedModelSelection !== null
+      ? { requestedModelSelection: row.requestedModelSelection }
+      : {}),
+    ...(row.appliedModelSelection !== null
+      ? { appliedModelSelection: row.appliedModelSelection }
+      : {}),
+    ...(row.providerReportedModelId !== null
+      ? { providerReportedModelId: row.providerReportedModelId }
+      : {}),
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
     updatedAt: row.updatedAt,
@@ -322,6 +337,7 @@ function mapProjectShellRow(
     workspaceRoot: row.workspaceRoot,
     repositoryIdentity,
     defaultModelSelection: row.defaultModelSelection,
+    agentOrchestrationTrusted: row.agentOrchestrationTrusted === 1,
     defaultThreadEnvMode: row.defaultThreadEnvMode,
     faviconPath: row.faviconPath ?? null,
     scripts: row.scripts,
@@ -399,6 +415,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
+          agent_orchestration_trusted AS "agentOrchestrationTrusted",
           default_thread_env_mode AS "defaultThreadEnvMode",
           favicon_path AS "faviconPath",
           scripts_json AS "scripts",
@@ -418,6 +435,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           thread_id AS "threadId",
           project_id AS "projectId",
+          agent_parent_thread_id AS "agentParentThreadId",
           title,
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
@@ -456,6 +474,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           thread_id AS "threadId",
           project_id AS "projectId",
+          agent_parent_thread_id AS "agentParentThreadId",
           title,
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
@@ -496,6 +515,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           thread_id AS "threadId",
           project_id AS "projectId",
+          agent_parent_thread_id AS "agentParentThreadId",
           title,
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
@@ -604,6 +624,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           provider_session_id AS "providerSessionId",
           provider_thread_id AS "providerThreadId",
           runtime_mode AS "runtimeMode",
+          requested_model_selection_json AS "requestedModelSelection",
+          applied_model_selection_json AS "appliedModelSelection",
+          provider_reported_model_id AS "providerReportedModelId",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"
@@ -625,6 +648,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
+          sessions.requested_model_selection_json AS "requestedModelSelection",
+          sessions.applied_model_selection_json AS "appliedModelSelection",
+          sessions.provider_reported_model_id AS "providerReportedModelId",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -650,6 +676,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
+          sessions.requested_model_selection_json AS "requestedModelSelection",
+          sessions.applied_model_selection_json AS "appliedModelSelection",
+          sessions.provider_reported_model_id AS "providerReportedModelId",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -860,6 +889,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
+          agent_orchestration_trusted AS "agentOrchestrationTrusted",
           default_thread_env_mode AS "defaultThreadEnvMode",
           favicon_path AS "faviconPath",
           scripts_json AS "scripts",
@@ -884,6 +914,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
+          agent_orchestration_trusted AS "agentOrchestrationTrusted",
           default_thread_env_mode AS "defaultThreadEnvMode",
           favicon_path AS "faviconPath",
           scripts_json AS "scripts",
@@ -940,6 +971,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           thread_id AS "threadId",
           project_id AS "projectId",
+          agent_parent_thread_id AS "agentParentThreadId",
           title,
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
@@ -1066,6 +1098,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
           runtime_mode AS "runtimeMode",
+          requested_model_selection_json AS "requestedModelSelection",
+          applied_model_selection_json AS "appliedModelSelection",
+          provider_reported_model_id AS "providerReportedModelId",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"
@@ -1670,6 +1705,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     ? { providerInstanceId: row.providerInstanceId }
                     : {}),
                   runtimeMode: row.runtimeMode,
+                  ...(row.requestedModelSelection !== null
+                    ? { requestedModelSelection: row.requestedModelSelection }
+                    : {}),
+                  ...(row.appliedModelSelection !== null
+                    ? { appliedModelSelection: row.appliedModelSelection }
+                    : {}),
+                  ...(row.providerReportedModelId !== null
+                    ? { providerReportedModelId: row.providerReportedModelId }
+                    : {}),
                   activeTurnId: row.activeTurnId,
                   lastError: row.lastError,
                   updatedAt: row.updatedAt,
@@ -1687,6 +1731,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 workspaceRoot: row.workspaceRoot,
                 repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
                 defaultModelSelection: row.defaultModelSelection,
+                agentOrchestrationTrusted: row.agentOrchestrationTrusted === 1,
                 defaultThreadEnvMode: row.defaultThreadEnvMode,
                 faviconPath: row.faviconPath ?? null,
                 scripts: row.scripts,
@@ -1698,6 +1743,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               const threads: ReadonlyArray<OrchestrationThread> = threadRows.map((row) => ({
                 id: row.threadId,
                 projectId: row.projectId,
+                agentParentThreadId: row.agentParentThreadId,
                 title: row.title,
                 modelSelection: row.modelSelection,
                 runtimeMode: row.runtimeMode,
@@ -1822,6 +1868,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   title: row.title,
                   workspaceRoot: row.workspaceRoot,
                   defaultModelSelection: row.defaultModelSelection,
+                  agentOrchestrationTrusted: row.agentOrchestrationTrusted === 1,
                   defaultThreadEnvMode: row.defaultThreadEnvMode,
                   faviconPath: row.faviconPath ?? null,
                   scripts: row.scripts,
@@ -1909,6 +1956,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 threads.push({
                   id: row.threadId,
                   projectId: row.projectId,
+                  agentParentThreadId: row.agentParentThreadId,
                   title: row.title,
                   modelSelection: row.modelSelection,
                   runtimeMode: row.runtimeMode,
@@ -2049,6 +2097,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   ? Result.succeed({
                       id: row.threadId,
                       projectId: row.projectId,
+                      agentParentThreadId: row.agentParentThreadId,
                       title: row.title,
                       modelSelection: row.modelSelection,
                       runtimeMode: row.runtimeMode,
@@ -2198,6 +2247,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 (row): OrchestrationThreadShell => ({
                   id: row.threadId,
                   projectId: row.projectId,
+                  agentParentThreadId: row.agentParentThreadId,
                   title: row.title,
                   modelSelection: row.modelSelection,
                   runtimeMode: row.runtimeMode,
@@ -2481,6 +2531,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       return Option.some({
         id: threadRow.value.threadId,
         projectId: threadRow.value.projectId,
+        agentParentThreadId: threadRow.value.agentParentThreadId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
         runtimeMode: threadRow.value.runtimeMode,
@@ -2626,6 +2677,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       const thread = {
         id: threadRow.value.threadId,
         projectId: threadRow.value.projectId,
+        agentParentThreadId: threadRow.value.agentParentThreadId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
         runtimeMode: threadRow.value.runtimeMode,

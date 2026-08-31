@@ -2,6 +2,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 
@@ -18,10 +19,18 @@ import {
 const ProjectionProjectDbRow = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+    agentOrchestrationTrusted: Schema.Number,
     scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
   }),
 );
 type ProjectionProjectDbRow = typeof ProjectionProjectDbRow.Type;
+
+function toProjectionProject(row: ProjectionProjectDbRow): ProjectionProject {
+  return {
+    ...row,
+    agentOrchestrationTrusted: row.agentOrchestrationTrusted === 1,
+  };
+}
 
 const makeProjectionProjectRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -35,6 +44,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           title,
           workspace_root,
           default_model_selection_json,
+          agent_orchestration_trusted,
           default_thread_env_mode,
           favicon_path,
           scripts_json,
@@ -47,6 +57,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           ${row.title},
           ${row.workspaceRoot},
           ${row.defaultModelSelection !== null ? JSON.stringify(row.defaultModelSelection) : null},
+          ${row.agentOrchestrationTrusted ? 1 : 0},
           ${row.defaultThreadEnvMode},
           ${row.faviconPath ?? null},
           ${JSON.stringify(row.scripts)},
@@ -59,6 +70,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           title = excluded.title,
           workspace_root = excluded.workspace_root,
           default_model_selection_json = excluded.default_model_selection_json,
+          agent_orchestration_trusted = excluded.agent_orchestration_trusted,
           default_thread_env_mode = excluded.default_thread_env_mode,
           favicon_path = excluded.favicon_path,
           scripts_json = excluded.scripts_json,
@@ -78,6 +90,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           title,
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
+          agent_orchestration_trusted AS "agentOrchestrationTrusted",
           default_thread_env_mode AS "defaultThreadEnvMode",
           favicon_path AS "faviconPath",
           scripts_json AS "scripts",
@@ -99,6 +112,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           title,
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
+          agent_orchestration_trusted AS "agentOrchestrationTrusted",
           default_thread_env_mode AS "defaultThreadEnvMode",
           favicon_path AS "faviconPath",
           scripts_json AS "scripts",
@@ -127,11 +141,13 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
   const getById: ProjectionProjectRepositoryShape["getById"] = (input) =>
     getProjectionProjectRow(input).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionProjectRepository.getById:query")),
+      Effect.map(Option.map(toProjectionProject)),
     );
 
   const listAll: ProjectionProjectRepositoryShape["listAll"] = () =>
     listProjectionProjectRows().pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionProjectRepository.listAll:query")),
+      Effect.map((rows) => rows.map(toProjectionProject)),
     );
 
   const deleteById: ProjectionProjectRepositoryShape["deleteById"] = (input) =>

@@ -24,6 +24,7 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -148,6 +149,16 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   }
 }
 
+function emitTestInit(query: FakeClaudeQuery, model = "claude-sonnet-4-6"): void {
+  query.emit({
+    type: "system",
+    subtype: "init",
+    model,
+    session_id: "",
+    uuid: "sdk-test-init-message",
+  } as unknown as SDKMessage);
+}
+
 function makeHarness(config?: {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: ClaudeAdapterLiveOptions["nativeEventLogger"];
@@ -155,6 +166,9 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly autoInit?: boolean;
+  readonly autoInitModel?: string | null;
+  readonly identityHandshakeTimeoutMs?: number;
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -168,8 +182,25 @@ function makeHarness(config?: {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     createQuery: (input) => {
       createInput = input;
+      if (config?.autoInit !== false) {
+        query.emit({
+          type: "system",
+          subtype: "init",
+          model:
+            config?.autoInitModel === null
+              ? undefined
+              : (config?.autoInitModel ?? input.options.model ?? "claude-sonnet-4-6"),
+          // The generic harness handshake proves model identity only. Tests
+          // that exercise provider thread ids emit their own real session id.
+          session_id: "",
+          uuid: "sdk-auto-init-message",
+        } as unknown as SDKMessage);
+      }
       return query;
     },
+    ...(config?.identityHandshakeTimeoutMs !== undefined
+      ? { identityHandshakeTimeoutMs: config.identityHandshakeTimeoutMs }
+      : {}),
     ...(config?.nativeEventLogger
       ? {
           nativeEventLogger: config.nativeEventLogger,
@@ -1750,6 +1781,7 @@ describe("ClaudeAdapterLive", () => {
           createQuery: () => {
             const query = new FakeClaudeQuery();
             queries.push(query);
+            emitTestInit(query);
             return query;
           },
         });
@@ -2368,6 +2400,7 @@ describe("ClaudeAdapterLive", () => {
           createQuery: () => {
             const query = new FakeClaudeQuery();
             queries.push(query);
+            emitTestInit(query);
             return query;
           },
         });
@@ -2459,6 +2492,7 @@ describe("ClaudeAdapterLive", () => {
                 promptConsumerError = error;
               }
             })();
+            emitTestInit(query);
             return query;
           },
         });
@@ -4193,6 +4227,176 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect("captures provider-reported model identity from the real SDK init message", () => {
+    const harness = makeHarness({ autoInit: false });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const modelSelection = {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-4-6",
+      };
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
+      const startFiber = yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          modelSelection,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkChild);
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      assert.equal(startFiber.pollUnsafe(), undefined);
+      assert.deepEqual(
+        runtimeEvents.map((event) => event.type),
+        ["session.started"],
+      );
+      harness.query.emit({
+        type: "system",
+        subtype: "init",
+        model: "claude-opus-4-6[1m]",
+        session_id: "sdk-init-identity",
+        uuid: "sdk-init-identity-message",
+      } as unknown as SDKMessage);
+      const session = yield* Fiber.join(startFiber);
+      assert.deepEqual(session.requestedModelSelection, modelSelection);
+      assert.deepEqual(session.appliedModelSelection, modelSelection);
+      assert.equal(session.providerReportedModelId, "claude-opus-4-6[1m]");
+      assert.equal(session.status, "ready");
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      assert.deepEqual(
+        runtimeEvents.map((event) => event.type),
+        ["session.started", "thread.started", "session.configured", "session.state.changed"],
+      );
+      yield* Fiber.interrupt(eventsFiber);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails startup when SDK system/init omits model identity", () => {
+    const harness = makeHarness({ autoInitModel: null });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const error = yield* Effect.flip(
+        adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        }),
+      );
+      assert.equal(error._tag, "ProviderAdapterProcessError");
+      assert.include(error.message, "system/init did not report a model identity");
+      assert.isFalse(yield* adapter.hasSession(THREAD_ID));
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails deterministically when SDK system/init never arrives", () => {
+    const harness = makeHarness({ autoInit: false, identityHandshakeTimeoutMs: 1_000 });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const startFiber = yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkChild);
+      assert.equal(startFiber.pollUnsafe(), undefined);
+      yield* TestClock.adjust("1 second");
+      const error = yield* Fiber.join(startFiber).pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterProcessError");
+      assert.include(error.message, "Timed out waiting");
+      assert.isFalse(yield* adapter.hasSession(THREAD_ID));
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("emits model.rerouted only when a top-level assistant changes model identity", () => {
+    const harness = makeHarness({ autoInitModel: "claude-opus-4-6[1m]" });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-6",
+        },
+        runtimeMode: "full-access",
+      });
+
+      const sameModelProcessed = yield* Deferred.make<void>();
+      const rerouted =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "model.rerouted" }>>();
+      const rerouteEvents: Array<Extract<ProviderRuntimeEvent, { type: "model.rerouted" }>> = [];
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.type === "model.rerouted") {
+          rerouteEvents.push(event);
+          return Deferred.succeed(rerouted, event).pipe(Effect.ignore);
+        }
+        return event.type === "item.completed"
+          ? Deferred.succeed(sameModelProcessed, undefined).pipe(Effect.ignore)
+          : Effect.void;
+      }).pipe(Effect.forkChild);
+
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-model-snapshot",
+        uuid: "assistant-same-model",
+        parent_tool_use_id: null,
+        message: {
+          model: "claude-opus-4-6[1m]",
+          id: "assistant-same-model-message",
+          role: "assistant",
+          content: [{ type: "text", text: "same model" }],
+        },
+      } as unknown as SDKMessage);
+      yield* Deferred.await(sameModelProcessed);
+      assert.deepEqual(rerouteEvents, []);
+
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-model-snapshot",
+        uuid: "assistant-changed-model",
+        parent_tool_use_id: null,
+        message: {
+          model: "claude-sonnet-4-6",
+          id: "assistant-changed-model-message",
+          role: "assistant",
+          content: [{ type: "text", text: "changed model" }],
+        },
+      } as unknown as SDKMessage);
+      const event = yield* Deferred.await(rerouted);
+      assert.equal(rerouteEvents.length, 1);
+      assert.deepEqual(event.payload, {
+        fromModel: "claude-opus-4-6[1m]",
+        toModel: "claude-sonnet-4-6",
+        reason: "Claude assistant snapshot reported a different model.",
+      });
+      assert.equal(
+        (yield* adapter.listSessions())[0]?.providerReportedModelId,
+        "claude-sonnet-4-6",
+      );
+      yield* Fiber.interrupt(eventsFiber);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("updates model on sendTurn when model override is provided", () => {
     const harness = makeHarness();

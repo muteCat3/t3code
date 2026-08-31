@@ -214,6 +214,7 @@ export function projectEvent(
             title: payload.title,
             workspaceRoot: payload.workspaceRoot,
             defaultModelSelection: payload.defaultModelSelection,
+            agentOrchestrationTrusted: false,
             defaultThreadEnvMode: null,
             faviconPath: payload.faviconPath ?? null,
             scripts: payload.scripts,
@@ -247,6 +248,9 @@ export function projectEvent(
                     : {}),
                   ...(payload.defaultModelSelection !== undefined
                     ? { defaultModelSelection: payload.defaultModelSelection }
+                    : {}),
+                  ...(payload.agentOrchestrationTrusted !== undefined
+                    ? { agentOrchestrationTrusted: payload.agentOrchestrationTrusted }
                     : {}),
                   ...(payload.defaultThreadEnvMode !== undefined
                     ? { defaultThreadEnvMode: payload.defaultThreadEnvMode }
@@ -291,6 +295,7 @@ export function projectEvent(
           {
             id: payload.threadId,
             projectId: payload.projectId,
+            agentParentThreadId: payload.agentParentThreadId ?? null,
             title: payload.title,
             modelSelection: payload.modelSelection,
             runtimeMode: payload.runtimeMode,

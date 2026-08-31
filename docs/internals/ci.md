@@ -3,7 +3,7 @@
 > For maintainers. Using T3 Code? See [docs/user](../user/).
 
 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs these quality gates on pull requests
-and pushes to `main`:
+and pushes to `main` or the private fork's `mutecat/main` product branch:
 
 - **Check**: `vp check` (format and lint; this repo sets `typeCheck: false` in its lint options),
   then `vpr typecheck` for the workspace type check. The same job
@@ -21,6 +21,9 @@ and pushes to `main`:
   gate job itself fails, the lint runs.
 - **Release Smoke**: exercises release-only workflow steps through `scripts/release-smoke.ts`, so
   release breakage surfaces on PRs rather than at tag time.
+- **Fork Check**: `pnpm fork:check` validates the private fork's script and workflow wiring, checks
+  its policy and maintenance files with the repository's existing Vite+ formatter, and runs the
+  focused orchestration tests listed in `scripts/fork-check-tests.json`.
 
 `.github/workflows/release.yml` builds macOS (`arm64` and `x64`), Linux (`x64`), and Windows (`x64`)
 desktop artifacts from a single `v*.*.*` tag and publishes one GitHub release. It auto-enables

@@ -8,13 +8,16 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 import { ProjectionProjectRepositoryLive } from "./ProjectionProjects.ts";
 import { ProjectionThreadRepositoryLive } from "./ProjectionThreads.ts";
+import { ProjectionThreadSessionRepositoryLive } from "./ProjectionThreadSessions.ts";
 import { ProjectionProjectRepository } from "../Services/ProjectionProjects.ts";
 import { ProjectionThreadRepository } from "../Services/ProjectionThreads.ts";
+import { ProjectionThreadSessionRepository } from "../Services/ProjectionThreadSessions.ts";
 
 const projectionRepositoriesLayer = it.layer(
   Layer.mergeAll(
     ProjectionProjectRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     ProjectionThreadRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ProjectionThreadSessionRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     SqlitePersistenceMemory,
   ),
 );
@@ -34,6 +37,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
           model: "gpt-5.4",
         },
         defaultThreadEnvMode: null,
+        agentOrchestrationTrusted: false,
         scripts: [],
         createdAt: "2026-03-24T00:00:00.000Z",
         updatedAt: "2026-03-24T00:00:00.000Z",
@@ -68,6 +72,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5.4",
       });
+      assert.strictEqual(Option.getOrNull(persisted)?.agentOrchestrationTrusted, false);
     }),
   );
 
@@ -79,6 +84,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       yield* threads.upsert({
         threadId: ThreadId.make("thread-null-options"),
         projectId: ProjectId.make("project-null-options"),
+        agentParentThreadId: ThreadId.make("thread-root"),
         title: "Null options thread",
         modelSelection: {
           instanceId: ProviderInstanceId.make("claudeAgent"),
@@ -133,6 +139,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-opus-4-6",
       });
+      assert.strictEqual(Option.getOrNull(persisted)?.agentParentThreadId, "thread-root");
     }),
   );
 
@@ -143,6 +150,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       yield* threads.upsert({
         threadId: ThreadId.make("thread-settled"),
         projectId: ProjectId.make("project-1"),
+        agentParentThreadId: null,
         title: "Settled thread",
         modelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
@@ -219,6 +227,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       yield* threads.upsert({
         threadId: ThreadId.make("thread-linked-pr"),
         projectId: ProjectId.make("project-linked-pr"),
+        agentParentThreadId: null,
         title: "Linked pull request",
         modelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
@@ -255,6 +264,62 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
 
       const cleared = yield* threads.getById({ threadId: ThreadId.make("thread-linked-pr") });
       assert.strictEqual(Option.getOrNull(cleared)?.linkedPullRequest, null);
+    }),
+  );
+
+  it.effect("round-trips explicit and absent provider model identity", () =>
+    Effect.gen(function* () {
+      const sessions = yield* ProjectionThreadSessionRepository;
+      const requested = {
+        instanceId: ProviderInstanceId.make("codex_work"),
+        model: "gpt-5.6-sol",
+      };
+      const applied = {
+        instanceId: ProviderInstanceId.make("codex_work"),
+        model: "gpt-5.6-sol-2026-08-20",
+      };
+      yield* sessions.upsert({
+        threadId: ThreadId.make("thread-identity"),
+        status: "running",
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex_work"),
+        runtimeMode: "full-access",
+        requestedModelSelection: requested,
+        appliedModelSelection: applied,
+        providerReportedModelId: "gpt-5.6-sol-2026-08-20",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: "2026-03-24T00:00:00.000Z",
+      });
+      const persisted = yield* sessions.getByThreadId({
+        threadId: ThreadId.make("thread-identity"),
+      });
+      assert.deepStrictEqual(Option.getOrNull(persisted)?.requestedModelSelection, requested);
+      assert.deepStrictEqual(Option.getOrNull(persisted)?.appliedModelSelection, applied);
+      assert.strictEqual(
+        Option.getOrNull(persisted)?.providerReportedModelId,
+        "gpt-5.6-sol-2026-08-20",
+      );
+
+      yield* sessions.upsert({
+        threadId: ThreadId.make("thread-legacy-identity"),
+        status: "ready",
+        providerName: "codex",
+        providerInstanceId: null,
+        runtimeMode: "full-access",
+        requestedModelSelection: null,
+        appliedModelSelection: null,
+        providerReportedModelId: null,
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: "2026-03-24T00:00:00.000Z",
+      });
+      const legacy = yield* sessions.getByThreadId({
+        threadId: ThreadId.make("thread-legacy-identity"),
+      });
+      assert.strictEqual(Option.getOrNull(legacy)?.requestedModelSelection, null);
+      assert.strictEqual(Option.getOrNull(legacy)?.appliedModelSelection, null);
+      assert.strictEqual(Option.getOrNull(legacy)?.providerReportedModelId, null);
     }),
   );
 });

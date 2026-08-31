@@ -20,6 +20,8 @@ const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHO
 const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
 const emitXAiAskUserQuestion = process.env.T3_ACP_EMIT_XAI_ASK_USER_QUESTION === "1";
 const emitXAiExitPlanMode = process.env.T3_ACP_EMIT_XAI_EXIT_PLAN_MODE === "1";
+const omitSessionModels = process.env.T3_ACP_OMIT_SESSION_MODELS === "1";
+const omitSessionModes = process.env.T3_ACP_OMIT_SESSION_MODES === "1";
 const emitXAiPlanMdWrite = process.env.T3_ACP_EMIT_XAI_PLAN_MD_WRITE === "1";
 const emitXAiPromptCompleteThenHang = process.env.T3_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG === "1";
 const emitXAiRateLimitThenHang = process.env.T3_ACP_EMIT_XAI_RATE_LIMIT_THEN_HANG === "1";
@@ -333,8 +335,8 @@ const program = Effect.gen(function* () {
   yield* agent.handleCreateSession(() =>
     Effect.succeed({
       sessionId,
-      modes: modeState(),
-      models: modelState(),
+      ...(omitSessionModes ? {} : { modes: modeState() }),
+      ...(omitSessionModels ? {} : { models: modelState() }),
       configOptions: configOptions(),
     }),
   );
@@ -378,8 +380,8 @@ const program = Effect.gen(function* () {
         });
         yield* Effect.sleep(loadSessionDelayMs);
         return {
-          modes: modeState(),
-          models: modelState(),
+          ...(omitSessionModes ? {} : { modes: modeState() }),
+          ...(omitSessionModels ? {} : { models: modelState() }),
           configOptions: configOptions(),
         };
       }
@@ -394,8 +396,8 @@ const program = Effect.gen(function* () {
         },
       });
       return {
-        modes: modeState(),
-        models: modelState(),
+        ...(omitSessionModes ? {} : { modes: modeState() }),
+        ...(omitSessionModels ? {} : { models: modelState() }),
         configOptions: configOptions(),
       };
     }),

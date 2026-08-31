@@ -2,6 +2,10 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
+
+import { ModelSelection } from "@t3tools/contracts";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 
@@ -12,6 +16,13 @@ import {
   DeleteProjectionThreadSessionInput,
   GetProjectionThreadSessionInput,
 } from "../Services/ProjectionThreadSessions.ts";
+
+const ProjectionThreadSessionDbRow = ProjectionThreadSession.mapFields(
+  Struct.assign({
+    requestedModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+    appliedModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+  }),
+);
 
 const makeProjectionThreadSessionRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -26,6 +37,9 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           provider_name,
           provider_instance_id,
           runtime_mode,
+          requested_model_selection_json,
+          applied_model_selection_json,
+          provider_reported_model_id,
           active_turn_id,
           last_error,
           updated_at
@@ -36,6 +50,9 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           ${row.providerName},
           ${row.providerInstanceId},
           ${row.runtimeMode},
+          ${row.requestedModelSelection === null ? null : JSON.stringify(row.requestedModelSelection)},
+          ${row.appliedModelSelection === null ? null : JSON.stringify(row.appliedModelSelection)},
+          ${row.providerReportedModelId},
           ${row.activeTurnId},
           ${row.lastError},
           ${row.updatedAt}
@@ -46,6 +63,9 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           provider_name = excluded.provider_name,
           provider_instance_id = excluded.provider_instance_id,
           runtime_mode = excluded.runtime_mode,
+          requested_model_selection_json = excluded.requested_model_selection_json,
+          applied_model_selection_json = excluded.applied_model_selection_json,
+          provider_reported_model_id = excluded.provider_reported_model_id,
           active_turn_id = excluded.active_turn_id,
           last_error = excluded.last_error,
           updated_at = excluded.updated_at
@@ -54,7 +74,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
 
   const getProjectionThreadSessionRow = SqlSchema.findOneOption({
     Request: GetProjectionThreadSessionInput,
-    Result: ProjectionThreadSession,
+    Result: ProjectionThreadSessionDbRow,
     execute: ({ threadId }) =>
       sql`
         SELECT
@@ -63,6 +83,9 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
           runtime_mode AS "runtimeMode",
+          requested_model_selection_json AS "requestedModelSelection",
+          applied_model_selection_json AS "appliedModelSelection",
+          provider_reported_model_id AS "providerReportedModelId",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"

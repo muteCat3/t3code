@@ -60,6 +60,7 @@ import {
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
+  applyGrokAcpInteractionMode,
   applyGrokAcpModelSelection,
   currentGrokModelIdFromSessionSetup,
   currentGrokReasoningEffortFromSessionSetup,
@@ -1228,6 +1229,14 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           const currentStartModelId = currentGrokModelIdFromSessionSetup(
             started.sessionSetupResult,
           );
+          if (currentStartModelId === undefined) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue:
+                "Grok ACP did not report currentModelId during session setup; model identity cannot be verified.",
+            });
+          }
           const currentStartReasoningEffort = currentGrokReasoningEffortFromSessionSetup(
             started.sessionSetupResult,
           );
@@ -1252,7 +1261,17 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             status: "ready",
             runtimeMode: input.runtimeMode,
             cwd,
-            ...(boundModelId ? { model: resolveGrokAcpBaseModelId(boundModelId) } : {}),
+            model: resolveGrokAcpBaseModelId(boundModelId ?? currentStartModelId),
+            ...(grokModelSelection
+              ? {
+                  requestedModelSelection: grokModelSelection,
+                  appliedModelSelection: {
+                    ...grokModelSelection,
+                    model: resolveGrokAcpBaseModelId(boundModelId ?? currentStartModelId),
+                  },
+                }
+              : {}),
+            providerReportedModelId: boundModelId ?? currentStartModelId,
             threadId: input.threadId,
             resumeCursor: {
               schemaVersion: GROK_RESUME_VERSION,
@@ -1562,6 +1581,21 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
               });
               ctx.currentModelId = currentModelId;
+              if (input.interactionMode !== undefined) {
+                yield* applyGrokAcpInteractionMode({
+                  runtime: ctx.acp,
+                  modeState: yield* ctx.acp.getModeState,
+                  interactionMode: input.interactionMode,
+                  mapError: (cause) =>
+                    mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_mode", cause),
+                  unsupported: (interactionMode) =>
+                    new ProviderAdapterValidationError({
+                      provider: PROVIDER,
+                      operation: "sendTurn",
+                      issue: `Grok ACP did not advertise a mode compatible with '${interactionMode}'.`,
+                    }),
+                });
+              }
               if (requestedTurnReasoningEffort !== undefined) {
                 ctx.currentReasoningEffort = normalizeGrokReasoningEffort(
                   requestedTurnReasoningEffort,
@@ -1594,6 +1628,16 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 activeTurnId: turnId,
                 updatedAt: yield* nowIso,
                 ...(displayModel ? { model: displayModel } : {}),
+                ...(turnModelSelection
+                  ? {
+                      requestedModelSelection: turnModelSelection,
+                      appliedModelSelection: {
+                        ...turnModelSelection,
+                        ...(displayModel ? { model: displayModel } : {}),
+                      },
+                    }
+                  : {}),
+                ...(currentModelId ? { providerReportedModelId: currentModelId } : {}),
               };
               if (steeringTurnId === undefined) {
                 yield* beginTurnLiveness(ctx, turnId);

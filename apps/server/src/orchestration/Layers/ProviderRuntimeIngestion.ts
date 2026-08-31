@@ -1653,11 +1653,54 @@ const make = Effect.gen(function* () {
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
+              ...(thread.session?.requestedModelSelection !== undefined
+                ? { requestedModelSelection: thread.session.requestedModelSelection }
+                : {}),
+              ...(thread.session?.appliedModelSelection !== undefined
+                ? { appliedModelSelection: thread.session.appliedModelSelection }
+                : {}),
+              ...(thread.session?.providerReportedModelId !== undefined
+                ? { providerReportedModelId: thread.session.providerReportedModelId }
+                : {}),
               activeTurnId: nextActiveTurnId,
               lastError,
               updatedAt: now,
             },
             createdAt: now,
+          });
+        }
+      }
+
+      // Identity changes are session state, not activity-only telemetry. Claude
+      // learns its provider identity from the real SDK init message after
+      // startSession returns, while Codex can later reroute a live model. Read
+      // the adapter session after those events and project the triplet so the
+      // orchestration startup/reroute barrier observes runtime truth.
+      if (
+        thread.session !== null &&
+        (event.type === "session.configured" || event.type === "model.rerouted")
+      ) {
+        const providerSessions = yield* providerService.listSessions();
+        const providerSession = providerSessions.find((session) => session.threadId === thread.id);
+        if (providerSession) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.session.set",
+            commandId: yield* providerCommandId(event, "thread-session-identity-set"),
+            threadId: thread.id,
+            session: {
+              ...thread.session,
+              ...(providerSession.requestedModelSelection !== undefined
+                ? { requestedModelSelection: providerSession.requestedModelSelection }
+                : {}),
+              ...(providerSession.appliedModelSelection !== undefined
+                ? { appliedModelSelection: providerSession.appliedModelSelection }
+                : {}),
+              ...(providerSession.providerReportedModelId !== undefined
+                ? { providerReportedModelId: providerSession.providerReportedModelId }
+                : {}),
+              updatedAt: event.createdAt,
+            },
+            createdAt: event.createdAt,
           });
         }
       }

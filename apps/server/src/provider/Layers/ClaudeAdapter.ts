@@ -99,6 +99,7 @@ import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
+const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -275,6 +276,7 @@ interface ClaudeSessionContext {
   session: ProviderSession;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
+  readonly identityReady: Deferred.Deferred<string, ProviderAdapterProcessError>;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
@@ -333,7 +335,15 @@ export interface ClaudeAdapterLiveOptions {
   }) => ClaudeQueryRuntime;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /** Bounded startup wait for the SDK's authoritative system/init model. */
+  readonly identityHandshakeTimeoutMs?: number;
 }
+
+// Protocol startup boundary: the adapter cannot truthfully become ready until
+// the SDK reports its effective API model. Authentication and process startup
+// may take time, but an absent init must eventually settle instead of pinning a
+// child thread in connecting forever.
+const DEFAULT_CLAUDE_IDENTITY_HANDSHAKE_TIMEOUT_MS = 30_000;
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
@@ -2903,6 +2913,40 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    const providerReportedModelId = trimmedString(message.message.model);
+    if (providerReportedModelId) {
+      const previousProviderReportedModelId = context.session.providerReportedModelId;
+      context.session = {
+        ...context.session,
+        providerReportedModelId,
+        updatedAt: yield* nowIso,
+      };
+      if (
+        previousProviderReportedModelId !== undefined &&
+        previousProviderReportedModelId !== providerReportedModelId
+      ) {
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "model.rerouted",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          payload: {
+            fromModel: previousProviderReportedModelId,
+            toModel: providerReportedModelId,
+            reason: "Claude assistant snapshot reported a different model.",
+          },
+          providerRefs: nativeProviderRefs(context),
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/assistant/model-rerouted",
+            payload: message,
+          },
+        });
+      }
+    }
+
     // Auto-start a synthetic turn for assistant messages that arrive without
     // an active turn (e.g., background agent/subagent responses between user prompts).
     if (!context.turnState) {
@@ -3131,7 +3175,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     switch (message.subtype) {
-      case "init":
+      case "init": {
+        const providerReportedModelId = trimmedString(
+          (message as unknown as Record<string, unknown>).model,
+        );
+        if (!providerReportedModelId) {
+          yield* Deferred.fail(
+            context.identityReady,
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: context.session.threadId,
+              detail: "Claude SDK system/init did not report a model identity.",
+            }),
+          ).pipe(Effect.ignore);
+          return;
+        }
+        context.session = {
+          ...context.session,
+          providerReportedModelId,
+          updatedAt: yield* nowIso,
+        };
         yield* offerRuntimeEvent({
           ...base,
           type: "session.configured",
@@ -3139,7 +3202,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             config: message as Record<string, unknown>,
           },
         });
+        yield* Deferred.succeed(context.identityReady, providerReportedModelId).pipe(Effect.ignore);
         return;
+      }
       case "status":
         yield* offerRuntimeEvent({
           ...base,
@@ -3856,6 +3921,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const liveTaskIds = new Set<string>();
 
       const contextRef = yield* Ref.make<ClaudeSessionContext | undefined>(undefined);
+      const identityReady = yield* Deferred.make<string, ProviderAdapterProcessError>();
 
       /**
        * Handle AskUserQuestion tool calls by emitting a `user-input.requested`
@@ -4374,10 +4440,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         threadId,
         provider: PROVIDER,
         providerInstanceId: boundInstanceId,
-        status: "ready",
+        status: "connecting",
         runtimeMode: input.runtimeMode,
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(modelSelection?.model ? { model: modelSelection.model } : {}),
+        ...(modelSelection
+          ? {
+              requestedModelSelection: modelSelection,
+              appliedModelSelection: modelSelection,
+            }
+          : {}),
         ...(threadId ? { threadId } : {}),
         resumeCursor: {
           ...(threadId ? { threadId } : {}),
@@ -4393,6 +4465,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         session,
         promptQueue,
         query: queryRuntime,
+        identityReady,
         streamFiber: undefined,
         startedAt,
         basePermissionMode: permissionMode,
@@ -4430,54 +4503,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         providerRefs: {},
       });
 
-      const configuredStamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "session.configured",
-        eventId: configuredStamp.eventId,
-        provider: PROVIDER,
-        createdAt: configuredStamp.createdAt,
-        threadId,
-        payload: {
-          config: {
-            ...(apiModelId ? { model: apiModelId } : {}),
-            ...(input.cwd ? { cwd: input.cwd } : {}),
-            ...(effectiveEffort ? { effort: effectiveEffort } : {}),
-            ...(permissionMode ? { permissionMode } : {}),
-            ...(fastMode ? { fastMode: true } : {}),
-          },
-        },
-        providerRefs: {},
-      });
-
-      const readyStamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "session.state.changed",
-        eventId: readyStamp.eventId,
-        provider: PROVIDER,
-        createdAt: readyStamp.createdAt,
-        threadId,
-        payload: {
-          state: "ready",
-        },
-        providerRefs: {},
-      });
-
       let streamFiber: Fiber.Fiber<void, never>;
       streamFiber = runFork(
         Effect.exit(runSdkStream(context)).pipe(
-          Effect.flatMap((exit) => {
-            if (context.stopped) {
-              return Effect.void;
-            }
-            if (context.streamFiber === streamFiber) {
-              context.streamFiber = undefined;
-            }
-            return handleStreamExit(context, exit).pipe(
-              Effect.catch((cause) =>
-                Effect.logError("Failed to close Claude runtime stream.", { cause }),
-              ),
-            );
-          }),
+          Effect.flatMap((exit) =>
+            Effect.gen(function* () {
+              if (context.stopped) {
+                return;
+              }
+              if (context.streamFiber === streamFiber) {
+                context.streamFiber = undefined;
+              }
+              yield* Deferred.fail(
+                context.identityReady,
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId,
+                  detail: "Claude SDK stream exited before system/init reported model identity.",
+                }),
+              ).pipe(Effect.ignore);
+              yield* handleStreamExit(context, exit).pipe(
+                Effect.catch((cause) =>
+                  Effect.logError("Failed to close Claude runtime stream.", { cause }),
+                ),
+              );
+            }),
+          ),
         ),
       );
       context.streamFiber = streamFiber;
@@ -4487,8 +4538,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
       });
 
+      yield* Deferred.await(identityReady).pipe(
+        Effect.timeout(
+          options?.identityHandshakeTimeoutMs ?? DEFAULT_CLAUDE_IDENTITY_HANDSHAKE_TIMEOUT_MS,
+        ),
+        Effect.mapError((cause) =>
+          isProviderAdapterProcessError(cause)
+            ? cause
+            : new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId,
+                detail: "Timed out waiting for Claude SDK system/init model identity.",
+                cause,
+              }),
+        ),
+        Effect.tapError(() => stopSessionInternal(context, { emitExitEvent: false })),
+      );
+
+      context.session = {
+        ...context.session,
+        status: "ready",
+        updatedAt: yield* nowIso,
+      };
+      const readyStamp = yield* makeEventStamp();
+      yield* offerRuntimeEvent({
+        type: "session.state.changed",
+        eventId: readyStamp.eventId,
+        provider: PROVIDER,
+        createdAt: readyStamp.createdAt,
+        threadId,
+        payload: { state: "ready" },
+        providerRefs: {},
+      });
+
       return {
-        ...session,
+        ...context.session,
       };
     },
   );
@@ -4523,6 +4607,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.session = {
         ...context.session,
         model: modelSelection.model,
+        requestedModelSelection: modelSelection,
+        appliedModelSelection: modelSelection,
       };
       const turnCaps = getClaudeModelCapabilities(modelSelection.model);
       const turnEffort = resolveClaudeEffort(

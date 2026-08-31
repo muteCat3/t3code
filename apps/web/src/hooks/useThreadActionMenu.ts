@@ -28,8 +28,13 @@ import {
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsTitleRegeneration,
   readThreadShell,
+  readThreadShells,
 } from "../state/entities";
 import { readLocalApi } from "../localApi";
+import {
+  archiveThreadConfirmationMessage,
+  visibleDirectChildCount,
+} from "../lib/agentOrchestrationUi";
 import { useUiStateStore } from "../uiStateStore";
 import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
@@ -258,9 +263,10 @@ export function useThreadActionMenu(input: {
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
           case "archive": {
-            if (confirmThreadArchive) {
+            const currentThreads = readThreadShells();
+            if (confirmThreadArchive || visibleDirectChildCount(thread, currentThreads) > 0) {
               const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(`Archive thread "${thread.title}"?`),
+                api.dialogs.confirm(archiveThreadConfirmationMessage(thread, currentThreads)),
               );
               if (confirmed._tag === "Failure" || !confirmed.value) return;
             }

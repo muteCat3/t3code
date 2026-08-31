@@ -133,21 +133,84 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       });
 
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-4"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: now,
+        commandId: CommandId.make("cmd-4"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-4"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex_work"),
+            runtimeMode: "full-access",
+            requestedModelSelection: {
+              instanceId: ProviderInstanceId.make("codex_work"),
+              model: "gpt-5.6-sol",
+            },
+            appliedModelSelection: {
+              instanceId: ProviderInstanceId.make("codex_work"),
+              model: "gpt-5.6-sol-2026-08-20",
+            },
+            providerReportedModelId: "gpt-5.6-sol-2026-08-20",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      });
+
       yield* projectionPipeline.bootstrap;
 
       const projectRows = yield* sql<{
         readonly projectId: string;
         readonly title: string;
         readonly scriptsJson: string;
+        readonly trusted: number;
       }>`
         SELECT
           project_id AS "projectId",
           title,
-          scripts_json AS "scriptsJson"
+          scripts_json AS "scriptsJson",
+          agent_orchestration_trusted AS trusted
         FROM projection_projects
       `;
       assert.deepEqual(projectRows, [
-        { projectId: "project-1", title: "Project 1", scriptsJson: "[]" },
+        { projectId: "project-1", title: "Project 1", scriptsJson: "[]", trusted: 0 },
+      ]);
+
+      const threadRows = yield* sql<{ readonly parentThreadId: string | null }>`
+        SELECT agent_parent_thread_id AS "parentThreadId"
+        FROM projection_threads
+        WHERE thread_id = 'thread-1'
+      `;
+      assert.deepEqual(threadRows, [{ parentThreadId: null }]);
+
+      const sessionRows = yield* sql<{
+        readonly requested: string | null;
+        readonly applied: string | null;
+        readonly reported: string | null;
+      }>`
+        SELECT
+          requested_model_selection_json AS requested,
+          applied_model_selection_json AS applied,
+          provider_reported_model_id AS reported
+        FROM projection_thread_sessions
+        WHERE thread_id = 'thread-1'
+      `;
+      assert.deepEqual(sessionRows, [
+        {
+          requested: '{"instanceId":"codex_work","model":"gpt-5.6-sol"}',
+          applied: '{"instanceId":"codex_work","model":"gpt-5.6-sol-2026-08-20"}',
+          reported: "gpt-5.6-sol-2026-08-20",
+        },
       ]);
 
       const messageRows = yield* sql<{
@@ -173,7 +236,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       `;
       assert.equal(stateRows.length, Object.keys(ORCHESTRATION_PROJECTOR_NAMES).length);
       for (const row of stateRows) {
-        assert.equal(row.lastAppliedSequence, 3);
+        assert.equal(row.lastAppliedSequence, 4);
       }
 
       yield* sql`CREATE TABLE thread_shell_updates (count INTEGER NOT NULL)`;
@@ -3034,6 +3097,13 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
 
       yield* engine.dispatch({
         type: "project.meta.update",
+        commandId: CommandId.make("cmd-scripts-project-trust"),
+        projectId: ProjectId.make("project-scripts"),
+        agentOrchestrationTrusted: true,
+      });
+
+      yield* engine.dispatch({
+        type: "project.meta.update",
         commandId: CommandId.make("cmd-scripts-project-update"),
         projectId: ProjectId.make("project-scripts"),
         scripts: [
@@ -3056,11 +3126,13 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
         readonly scriptsJson: string;
         readonly defaultModelSelection: string;
         readonly faviconPath: string | null;
+        readonly trusted: number;
       }>`
         SELECT
           scripts_json AS "scriptsJson",
           default_model_selection_json AS "defaultModelSelection",
-          favicon_path AS "faviconPath"
+          favicon_path AS "faviconPath",
+          agent_orchestration_trusted AS trusted
         FROM projection_projects
         WHERE project_id = 'project-scripts'
       `;
@@ -3070,6 +3142,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
             '[{"id":"script-1","name":"Build","command":"bun run build","icon":"build","runOnWorktreeCreate":false}]',
           defaultModelSelection: '{"instanceId":"codex","model":"gpt-5"}',
           faviconPath: "brand/icon.svg",
+          trusted: 1,
         },
       ]);
     }),
