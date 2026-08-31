@@ -31,7 +31,7 @@ jobs:
           run-install: true
 
       - name: Check fork policy files
-        run: pnpm fork:check
+        run: vp run fork:check
 
   check:
     name: Check

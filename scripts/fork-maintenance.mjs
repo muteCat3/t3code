@@ -1,13 +1,14 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
+const vp = NodePath.join(repoRoot, "node_modules", "vite-plus", "bin", "vp");
 const command = process.argv[2];
 
 const run = (program, args, options = {}) => {
-  const result = spawnSync(program, args, {
+  const result = NodeChildProcess.spawnSync(program, args, {
     cwd: repoRoot,
     encoding: "utf8",
     stdio: options.capture ? "pipe" : "inherit",
@@ -27,7 +28,7 @@ const fail = (message) => {
 };
 
 const checkPolicyFiles = () => {
-  const manifest = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(repoRoot, "package.json"), "utf8"));
   if (manifest.scripts?.["fork:check"] !== "node scripts/fork-maintenance.mjs check") {
     fail("package.json must expose the canonical fork:check command");
   }
@@ -35,11 +36,11 @@ const checkPolicyFiles = () => {
     fail("package.json must expose the canonical fork:update command");
   }
 
-  const workflow = readFileSync(path.join(repoRoot, ".github/workflows/ci.yml"), "utf8");
+  const workflow = NodeFS.readFileSync(NodePath.join(repoRoot, ".github/workflows/ci.yml"), "utf8");
   if (!/^\s{6}- mutecat\/main$/mu.test(workflow)) {
     fail("CI must run on pushes to mutecat/main");
   }
-  if (!/^\s{2}fork_check:$/mu.test(workflow) || !/^\s+run: pnpm fork:check$/mu.test(workflow)) {
+  if (!/^\s{2}fork_check:$/mu.test(workflow) || !/^\s+run: vp run fork:check$/mu.test(workflow)) {
     fail("CI must contain the separate fork:check job");
   }
   if (
@@ -55,17 +56,16 @@ const check = () => {
   checkPolicyFiles();
 
   const testManifest = "scripts/fork-check-tests.json";
-  const testFiles = JSON.parse(readFileSync(path.join(repoRoot, testManifest), "utf8"));
+  const testFiles = JSON.parse(NodeFS.readFileSync(NodePath.join(repoRoot, testManifest), "utf8"));
   if (!Array.isArray(testFiles) || testFiles.length === 0) {
     fail(`${testManifest} must contain at least one focused test file`);
   }
   for (const testFile of testFiles) {
-    if (typeof testFile !== "string" || !existsSync(path.join(repoRoot, testFile))) {
+    if (typeof testFile !== "string" || !NodeFS.existsSync(NodePath.join(repoRoot, testFile))) {
       fail(`${testManifest} references a missing test: ${String(testFile)}`);
     }
   }
 
-  const vp = path.join(repoRoot, "node_modules", "vite-plus", "bin", "vp");
   run(process.execPath, [
     vp,
     "fmt",
@@ -119,8 +119,7 @@ const update = () => {
   run("git", ["update-ref", "refs/heads/main", upstreamMain, oldMain]);
   run("git", ["merge", "--no-edit", "main"]);
 
-  const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-  run(pnpm, ["fork:check"], { shell: process.platform === "win32" });
+  run(process.execPath, [vp, "run", "fork:check"]);
 };
 
 if (command === "check") check();

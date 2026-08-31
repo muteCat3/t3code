@@ -21,7 +21,7 @@ and pushes to `main` or the private fork's `mutecat/main` product branch:
   gate job itself fails, the lint runs.
 - **Release Smoke**: exercises release-only workflow steps through `scripts/release-smoke.ts`, so
   release breakage surfaces on PRs rather than at tag time.
-- **Fork Check**: `pnpm fork:check` validates the private fork's script and workflow wiring, checks
+- **Fork Check**: `vp run fork:check` validates the private fork's script and workflow wiring, checks
   its policy and maintenance files with the repository's existing Vite+ formatter, and runs the
   focused orchestration tests listed in `scripts/fork-check-tests.json`.
 

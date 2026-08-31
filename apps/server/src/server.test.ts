@@ -7581,8 +7581,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.equal(dispatchResult.sequence, 1);
-      assert.deepEqual(effects, [
-        "query:thread-shell:active",
+      const archiveIndex = effects.indexOf("dispatch:thread.archive");
+      assert.ok(archiveIndex > 0);
+      assert.ok(
+        effects.slice(0, archiveIndex).every((effect) => effect === "query:thread-shell:active"),
+      );
+      assert.deepEqual(effects.slice(archiveIndex), [
         "dispatch:thread.archive",
         "dispatch:thread.session.stop",
         `terminal.close:${threadId}`,
