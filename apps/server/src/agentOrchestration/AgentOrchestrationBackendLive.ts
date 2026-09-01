@@ -71,6 +71,11 @@ export const subscribeChildChanges = (hub: PubSub.PubSub<OrchestrationThread>) =
     };
   });
 
+export const readObservedChildSnapshot = <A, E>(
+  observation: Pick<AgentChildObservation, "close">,
+  read: Effect.Effect<A, E>,
+) => read.pipe(Effect.onExit((exit) => (Exit.isFailure(exit) ? observation.close : Effect.void)));
+
 export const makeManagedWorktreeInput = (input: {
   readonly projectWorkspaceRoot: string;
   readonly parentHeadCommit: string;
@@ -386,7 +391,7 @@ const makeBackend = Effect.gen(function* () {
   )(function* (threadId) {
     const hub = yield* getChildHub(threadId);
     const observation = yield* subscribeChildChanges(hub);
-    const initial = yield* getThread(threadId);
+    const initial = yield* readObservedChildSnapshot(observation, getThread(threadId));
     if (initial === null) {
       yield* observation.close;
       return yield* Effect.fail(

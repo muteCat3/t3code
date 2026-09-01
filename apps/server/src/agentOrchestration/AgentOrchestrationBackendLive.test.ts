@@ -22,6 +22,7 @@ import {
   isOrchestrationMcpEligible,
   makeChildObservationHub,
   makeManagedWorktreeInput,
+  readObservedChildSnapshot,
   isRootSessionPendingOrchestrationRefresh,
   markRootSessionPendingOrchestrationRefresh,
   subscribeChildChanges,
@@ -82,6 +83,61 @@ describe("AgentOrchestrationBackendLive", () => {
         expect(hub.subscribers.size).toBe(0);
       }
     }),
+  );
+
+  it.effect("closes a post-subscribe snapshot on failure and transfers success ownership", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const hub = yield* makeChildObservationHub();
+        const failedSubscription = yield* subscribeChildChanges(hub);
+        let failedCloses = 0;
+        const failedObservation = {
+          ...failedSubscription,
+          close: failedSubscription.close.pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                failedCloses += 1;
+              }),
+            ),
+          ),
+        };
+
+        const failed = yield* Effect.exit(
+          readObservedChildSnapshot(
+            failedObservation,
+            Effect.fail({ _tag: "SnapshotFailure" as const }),
+          ),
+        );
+
+        expect(failed._tag).toBe("Failure");
+        expect(failedCloses).toBe(1);
+        expect(hub.subscribers.size).toBe(0);
+
+        const successfulSubscription = yield* subscribeChildChanges(hub);
+        let successfulCloses = 0;
+        const successfulObservation = {
+          ...successfulSubscription,
+          close: successfulSubscription.close.pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                successfulCloses += 1;
+              }),
+            ),
+          ),
+        };
+
+        const initial = yield* readObservedChildSnapshot(
+          successfulObservation,
+          Effect.succeed(child),
+        );
+
+        expect(initial).toBe(child);
+        expect(successfulCloses).toBe(0);
+        yield* successfulObservation.close;
+        expect(successfulCloses).toBe(1);
+        expect(hub.subscribers.size).toBe(0);
+      }),
+    ),
   );
 
   it("creates a managed worktree from the resolved parent commit at the project root", () => {
