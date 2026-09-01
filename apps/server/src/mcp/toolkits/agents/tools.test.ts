@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { Tool } from "effect/unstable/ai";
 
 import { PreviewToolkit } from "../preview/tools.ts";
-import { AgentToolkit } from "./tools.ts";
+import { AgentRespondTool, AgentToolkit } from "./tools.ts";
 
 describe("AgentToolkit", () => {
   it("exposes only the isolated orchestration tools", () => {
@@ -30,5 +30,11 @@ describe("AgentToolkit", () => {
       expect(schema.anyOf, tool.name).toBeUndefined();
       expect(schema.oneOf, tool.name).toBeUndefined();
     }
+  });
+
+  it("does not expose persistent approval choices to agent_respond", () => {
+    const schema = Tool.getJsonSchema(AgentRespondTool);
+    expect(JSON.stringify(schema)).not.toContain("acceptForSession");
+    expect(JSON.stringify(schema)).not.toContain("acceptAlways");
   });
 });

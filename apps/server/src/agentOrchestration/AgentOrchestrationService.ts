@@ -649,10 +649,14 @@ export class AgentOrchestrationService extends Context.Service<
           Effect.mapError(mapBackendError),
           Effect.tapError(() => Effect.sync(() => monitoredChildIds.delete(child.id))),
         );
-        yield* lifecycleWorker.enqueue({ root, child: observation.initial, provider });
-        yield* observation.changes.pipe(
-          Stream.mapError(mapBackendError),
-          Stream.runForEach((state) => lifecycleWorker.enqueue({ root, child: state, provider })),
+        yield* Effect.gen(function* () {
+          yield* lifecycleWorker.enqueue({ root, child: observation.initial, provider });
+          yield* observation.changes.pipe(
+            Stream.mapError(mapBackendError),
+            Stream.runForEach((state) => lifecycleWorker.enqueue({ root, child: state, provider })),
+          );
+        }).pipe(
+          Effect.ensuring(observation.close),
           Effect.ensuring(Effect.sync(() => monitoredChildIds.delete(child.id))),
           Effect.ignore,
           Effect.forkIn(workerScope),
@@ -699,7 +703,7 @@ export class AgentOrchestrationService extends Context.Service<
                 isStartupIdentityBarrierState(state, provider, modelSelection),
               ),
             ),
-          ).pipe(Effect.mapError(mapBackendError));
+          ).pipe(Effect.mapError(mapBackendError), Effect.ensuring(started.observation.close));
           const barrierThread = Option.getOrElse(barrier, () => child);
           const mismatch = identityFailure(barrierThread, provider, modelSelection);
           if (mismatch !== undefined || !identityReady(barrierThread, provider, modelSelection)) {
@@ -821,29 +825,33 @@ export class AgentOrchestrationService extends Context.Service<
           const observation = yield* backend
             .observeChild(child.id)
             .pipe(Effect.mapError(mapBackendError));
-          const initial = childSnapshot(observation.initial);
-          if (input.cursor === undefined || input.cursor !== initial.cursor)
-            return { child: initial, timedOut: false };
-          const next = Stream.runHead(
-            observation.changes.pipe(
-              Stream.mapError(mapBackendError),
-              Stream.filter((value) => cursorFor(value) !== input.cursor),
-            ),
-          );
-          if (input.timeoutMs === undefined) {
-            const value = yield* next;
-            return {
-              child: childSnapshot(Option.getOrElse(value, () => observation.initial)),
-              timedOut: false,
-            };
-          }
-          const value = yield* next.pipe(
-            Effect.timeoutOption(Duration.millis(input.timeoutMs)),
-            Effect.map(Option.flatten),
-          );
-          if (Option.isSome(value)) return { child: childSnapshot(value.value), timedOut: false };
-          const current = yield* backend.getThread(child.id).pipe(Effect.mapError(mapBackendError));
-          return { child: childSnapshot(current ?? observation.initial), timedOut: true };
+          return yield* Effect.gen(function* () {
+            const initial = childSnapshot(observation.initial);
+            if (input.cursor === undefined || input.cursor !== initial.cursor)
+              return { child: initial, timedOut: false };
+            const next = Stream.runHead(
+              observation.changes.pipe(
+                Stream.mapError(mapBackendError),
+                Stream.filter((value) => cursorFor(value) !== input.cursor),
+              ),
+            );
+            if (input.timeoutMs === undefined) {
+              const value = yield* next;
+              return {
+                child: childSnapshot(Option.getOrElse(value, () => observation.initial)),
+                timedOut: false,
+              };
+            }
+            const value = yield* next.pipe(
+              Effect.timeoutOption(Duration.millis(input.timeoutMs)),
+              Effect.map(Option.flatten),
+            );
+            if (Option.isSome(value)) return { child: childSnapshot(value.value), timedOut: false };
+            const current = yield* backend
+              .getThread(child.id)
+              .pipe(Effect.mapError(mapBackendError));
+            return { child: childSnapshot(current ?? observation.initial), timedOut: true };
+          }).pipe(Effect.ensuring(observation.close));
         },
       );
 
@@ -851,6 +859,22 @@ export class AgentOrchestrationService extends Context.Service<
         "AgentOrchestration.respond",
       )(function* (callerThreadId, input) {
         const { child } = yield* getChild(callerThreadId, input.threadId);
+        // The provider contract supports persistent approvals, but agent
+        // orchestration does not: those decisions belong in Ben's Root chat.
+        // Keep this guard even though AgentRespondInput's schema excludes the
+        // values, because service callers are not necessarily schema-decoded.
+        if (
+          input.kind === "approval" &&
+          (input.decision as string) !== "accept" &&
+          (input.decision as string) !== "decline" &&
+          (input.decision as string) !== "cancel"
+        ) {
+          return yield* fail(
+            "forbidden",
+            "Persistent approval decisions must be relayed to Ben in the Root chat.",
+            { childThreadId: child.id },
+          );
+        }
         const createdAt = yield* timestamp;
         const command: OrchestrationCommand =
           input.kind === "approval"
@@ -912,51 +936,61 @@ export class AgentOrchestrationService extends Context.Service<
         const current = childSnapshot(child);
         if (current.status !== "running" && current.status !== "waiting") return current;
         const first = yield* backend.observeChild(child.id).pipe(Effect.mapError(mapBackendError));
-        const createdAt = yield* timestamp;
-        yield* backend
-          .dispatch({
-            type: "thread.turn.interrupt",
-            commandId: yield* commandId,
-            threadId: child.id,
-            ...(child.latestTurn?.turnId ? { turnId: child.latestTurn.turnId } : {}),
-            createdAt,
-          })
-          .pipe(Effect.mapError(mapBackendError));
-        const drained = yield* Stream.runHead(
-          first.changes.pipe(
-            Stream.mapError(mapBackendError),
-            Stream.filter((state) => !["running", "waiting"].includes(childSnapshot(state).status)),
-          ),
-        ).pipe(Effect.timeoutOption(Duration.millis(deadlineMs)), Effect.map(Option.flatten));
-        if (Option.isSome(drained)) return childSnapshot(drained.value);
+        return yield* Effect.gen(function* () {
+          const createdAt = yield* timestamp;
+          yield* backend
+            .dispatch({
+              type: "thread.turn.interrupt",
+              commandId: yield* commandId,
+              threadId: child.id,
+              ...(child.latestTurn?.turnId ? { turnId: child.latestTurn.turnId } : {}),
+              createdAt,
+            })
+            .pipe(Effect.mapError(mapBackendError));
+          const drained = yield* Stream.runHead(
+            first.changes.pipe(
+              Stream.mapError(mapBackendError),
+              Stream.filter(
+                (state) => !["running", "waiting"].includes(childSnapshot(state).status),
+              ),
+            ),
+          ).pipe(Effect.timeoutOption(Duration.millis(deadlineMs)), Effect.map(Option.flatten));
+          if (Option.isSome(drained)) return childSnapshot(drained.value);
 
-        const second = yield* backend.observeChild(child.id).pipe(Effect.mapError(mapBackendError));
-        const secondInitial = childSnapshot(second.initial);
-        if (secondInitial.status !== "running" && secondInitial.status !== "waiting") {
-          return secondInitial;
-        }
-        const stopAt = yield* timestamp;
-        yield* backend
-          .dispatch({
-            type: "thread.session.stop",
-            commandId: yield* commandId,
-            threadId: child.id,
-            createdAt: stopAt,
-          })
-          .pipe(Effect.mapError(mapBackendError));
-        const stopped = yield* Stream.runHead(
-          second.changes.pipe(
-            Stream.mapError(mapBackendError),
-            Stream.filter((state) => !["running", "waiting"].includes(childSnapshot(state).status)),
-          ),
-        ).pipe(Effect.timeoutOption(Duration.millis(deadlineMs)), Effect.map(Option.flatten));
-        if (Option.isNone(stopped))
-          return yield* fail(
-            "drain_timeout",
-            `Child ${child.id} did not drain after interrupt and session stop.`,
-            { childThreadId: child.id },
-          );
-        return childSnapshot(stopped.value);
+          const second = yield* backend
+            .observeChild(child.id)
+            .pipe(Effect.mapError(mapBackendError));
+          return yield* Effect.gen(function* () {
+            const secondInitial = childSnapshot(second.initial);
+            if (secondInitial.status !== "running" && secondInitial.status !== "waiting") {
+              return secondInitial;
+            }
+            const stopAt = yield* timestamp;
+            yield* backend
+              .dispatch({
+                type: "thread.session.stop",
+                commandId: yield* commandId,
+                threadId: child.id,
+                createdAt: stopAt,
+              })
+              .pipe(Effect.mapError(mapBackendError));
+            const stopped = yield* Stream.runHead(
+              second.changes.pipe(
+                Stream.mapError(mapBackendError),
+                Stream.filter(
+                  (state) => !["running", "waiting"].includes(childSnapshot(state).status),
+                ),
+              ),
+            ).pipe(Effect.timeoutOption(Duration.millis(deadlineMs)), Effect.map(Option.flatten));
+            if (Option.isNone(stopped))
+              return yield* fail(
+                "drain_timeout",
+                `Child ${child.id} did not drain after interrupt and session stop.`,
+                { childThreadId: child.id },
+              );
+            return childSnapshot(stopped.value);
+          }).pipe(Effect.ensuring(second.close));
+        }).pipe(Effect.ensuring(first.close));
       });
 
       const archiveKnownChild = Effect.fn("AgentOrchestration.archiveKnownChild")(function* (

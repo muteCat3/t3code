@@ -8,6 +8,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  type AgentRespondInput,
   type OrchestrationThread,
   type ServerProvider,
 } from "@t3tools/contracts";
@@ -28,6 +29,7 @@ import { AgentOrchestrationBackend } from "./AgentOrchestrationBackend.ts";
 import { AgentOrchestrationError } from "@t3tools/contracts";
 
 const time = IsoDateTime.make("2026-08-31T12:00:00.000Z");
+const noObservationClose = Effect.void;
 const provider = (driver: string, instanceId = driver): ServerProvider => ({
   instanceId: ProviderInstanceId.make(instanceId),
   driver: ProviderDriverKind.make(driver),
@@ -189,6 +191,166 @@ describe("AgentOrchestrationService", () => {
     expect(Schema.is(AgentOrchestrationError)(error)).toBe(true);
   });
 
+  it.effect("defensively rejects persistent approval choices from service callers", () => {
+    const root: OrchestrationThread = {
+      ...baseThread(),
+      id: ThreadId.make("root"),
+      agentParentThreadId: null,
+    };
+    const child = baseThread();
+    const backend = AgentOrchestrationBackend.of({
+      getThread: (id) => Effect.succeed(id === root.id ? root : id === child.id ? child : null),
+      getProject: () =>
+        Effect.succeed({
+          id: root.projectId,
+          title: "Project",
+          workspaceRoot: "C:/project",
+          defaultModelSelection: root.modelSelection,
+          agentOrchestrationTrusted: true,
+          scripts: [],
+          createdAt: time,
+          updatedAt: time,
+          deletedAt: null,
+        }),
+      listDirectChildren: () => Effect.succeed([child]),
+      listAgentRoots: Effect.succeed([]),
+      getProviders: Effect.succeed([provider("codex")]),
+      startChildTurn: () => Effect.die("unused"),
+      observeChild: () => Effect.die("must reject before observing"),
+      dispatch: () => Effect.die("must reject before dispatching"),
+    });
+    const layer = AgentOrchestrationService.layer.pipe(
+      Layer.provide(Layer.succeed(AgentOrchestrationBackend, backend)),
+      Layer.provide(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const error = yield* (yield* AgentOrchestrationService)
+        .respond(root.id, {
+          threadId: child.id,
+          kind: "approval",
+          requestId: ApprovalRequestId.make("request"),
+          decision: "acceptAlways",
+        } as unknown as AgentRespondInput)
+        .pipe(Effect.flip);
+      expect(error.code).toBe("forbidden");
+      expect(error.message).toContain("relayed to Ben");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("closes wait observations on cursor mismatch and absent-cursor returns", () => {
+    const root: OrchestrationThread = {
+      ...baseThread(),
+      id: ThreadId.make("root"),
+      agentParentThreadId: null,
+    };
+    const child = baseThread();
+    let closes = 0;
+    const backend = AgentOrchestrationBackend.of({
+      getThread: (id) => Effect.succeed(id === root.id ? root : id === child.id ? child : null),
+      getProject: () =>
+        Effect.succeed({
+          id: root.projectId,
+          title: "Project",
+          workspaceRoot: "C:/project",
+          defaultModelSelection: root.modelSelection,
+          agentOrchestrationTrusted: true,
+          scripts: [],
+          createdAt: time,
+          updatedAt: time,
+          deletedAt: null,
+        }),
+      listDirectChildren: () => Effect.succeed([child]),
+      listAgentRoots: Effect.succeed([]),
+      getProviders: Effect.succeed([provider("codex")]),
+      startChildTurn: () => Effect.die("unused"),
+      observeChild: () =>
+        Effect.succeed({
+          initial: child,
+          changes: Stream.never,
+          close: Effect.sync(() => {
+            closes += 1;
+          }),
+        }),
+      dispatch: () => Effect.die("wait must not dispatch"),
+    });
+    const layer = AgentOrchestrationService.layer.pipe(
+      Layer.provide(Layer.succeed(AgentOrchestrationBackend, backend)),
+      Layer.provide(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const service = yield* AgentOrchestrationService;
+      expect((yield* service.wait(root.id, { threadId: child.id })).timedOut).toBe(false);
+      expect(closes).toBe(1);
+      expect(
+        (yield* service.wait(root.id, { threadId: child.id, cursor: "stale-cursor" })).timedOut,
+      ).toBe(false);
+      expect(closes).toBe(2);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.live("closes both drain observations when the second initial state is already idle", () => {
+    const root: OrchestrationThread = {
+      ...baseThread(),
+      id: ThreadId.make("root"),
+      agentParentThreadId: null,
+    };
+    const running = baseThread();
+    const idle: OrchestrationThread = {
+      ...running,
+      latestTurn: { ...running.latestTurn!, state: "completed", completedAt: time },
+    };
+    let observations = 0;
+    let closes = 0;
+    const dispatches: Array<string> = [];
+    const backend = AgentOrchestrationBackend.of({
+      getThread: (id) => Effect.succeed(id === root.id ? root : running),
+      getProject: () =>
+        Effect.succeed({
+          id: root.projectId,
+          title: "Project",
+          workspaceRoot: "C:/project",
+          defaultModelSelection: root.modelSelection,
+          agentOrchestrationTrusted: true,
+          scripts: [],
+          createdAt: time,
+          updatedAt: time,
+          deletedAt: null,
+        }),
+      listDirectChildren: () => Effect.succeed([running]),
+      listAgentRoots: Effect.succeed([]),
+      getProviders: Effect.succeed([provider("codex")]),
+      startChildTurn: () => Effect.die("unused"),
+      observeChild: () => {
+        observations += 1;
+        return Effect.succeed({
+          initial: observations === 1 ? running : idle,
+          changes: Stream.never,
+          close: Effect.sync(() => {
+            closes += 1;
+          }),
+        });
+      },
+      dispatch: (command) =>
+        Effect.sync(() => {
+          dispatches.push(command.type);
+        }),
+    });
+    const layer = AgentOrchestrationService.layer.pipe(
+      Layer.provide(Layer.succeed(AgentOrchestrationBackend, backend)),
+      Layer.provide(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const result = yield* (yield* AgentOrchestrationService).interruptAndDrain(
+        root.id,
+        running.id,
+        1,
+      );
+      expect(result.status).toBe("idle");
+      expect(closes).toBe(2);
+      expect(dispatches).toEqual(["thread.turn.interrupt"]);
+    }).pipe(Effect.provide(layer));
+  });
+
   it("treats absent legacy lineage as a top-level root", () => {
     expect(isTopLevelAgentRoot({} as Pick<OrchestrationThread, "agentParentThreadId">)).toBe(true);
     expect(isTopLevelAgentRoot({ agentParentThreadId: ThreadId.make("parent") })).toBe(false);
@@ -323,7 +485,11 @@ describe("AgentOrchestrationService", () => {
       startChildTurn: () => Effect.die("unused"),
       observeChild: () => {
         observations += 1;
-        return Effect.succeed({ initial: child, changes: Stream.make(child, child) });
+        return Effect.succeed({
+          initial: child,
+          changes: Stream.make(child, child),
+          close: noObservationClose,
+        });
       },
       dispatch: () =>
         Effect.sync(() => {
@@ -386,7 +552,12 @@ describe("AgentOrchestrationService", () => {
         listAgentRoots: Effect.succeed([root]),
         getProviders: Effect.succeed([provider("codex")]),
         startChildTurn: () => Effect.die("unused"),
-        observeChild: () => Effect.succeed({ initial: child, changes: Stream.make(child, child) }),
+        observeChild: () =>
+          Effect.succeed({
+            initial: child,
+            changes: Stream.make(child, child),
+            close: noObservationClose,
+          }),
         dispatch: () =>
           Effect.sync(() => {
             dispatches += 1;
@@ -447,7 +618,12 @@ describe("AgentOrchestrationService", () => {
         listAgentRoots: Effect.succeed([root]),
         getProviders: Effect.succeed([provider("codex")]),
         startChildTurn: () => Effect.die("unused"),
-        observeChild: () => Effect.succeed({ initial: child, changes: Stream.make(child) }),
+        observeChild: () =>
+          Effect.succeed({
+            initial: child,
+            changes: Stream.make(child),
+            close: noObservationClose,
+          }),
         dispatch: () =>
           Effect.sync(() => {
             dispatches += 1;
@@ -497,6 +673,7 @@ describe("AgentOrchestrationService", () => {
         },
       };
       const commands: Array<unknown> = [];
+      let startupObservationCloses = 0;
       const backend = AgentOrchestrationBackend.of({
         getThread: (id) => Effect.succeed(id === root.id ? root : child),
         getProject: () =>
@@ -515,8 +692,18 @@ describe("AgentOrchestrationService", () => {
         listAgentRoots: Effect.succeed([]),
         getProviders: Effect.succeed([provider("codex")]),
         startChildTurn: () =>
-          Effect.succeed({ child, observation: { initial: child, changes: Stream.empty } }),
-        observeChild: () => Effect.succeed({ initial: child, changes: Stream.empty }),
+          Effect.succeed({
+            child,
+            observation: {
+              initial: child,
+              changes: Stream.empty,
+              close: Effect.sync(() => {
+                startupObservationCloses += 1;
+              }),
+            },
+          }),
+        observeChild: () =>
+          Effect.succeed({ initial: child, changes: Stream.empty, close: noObservationClose }),
         dispatch: (command) =>
           Effect.sync(() => {
             commands.push(command);
@@ -557,6 +744,7 @@ describe("AgentOrchestrationService", () => {
               command.type === "thread.settle",
           ),
         ).toBe(true);
+        expect(startupObservationCloses).toBe(1);
       }).pipe(Effect.provide(layer));
     },
   );
@@ -593,7 +781,11 @@ describe("AgentOrchestrationService", () => {
         getProviders: Effect.succeed([provider("codex")]),
         startChildTurn: () => Effect.die("unused"),
         observeChild: () =>
-          Effect.succeed({ initial: child, changes: Stream.make({ ...child, archivedAt: time }) }),
+          Effect.succeed({
+            initial: child,
+            changes: Stream.make({ ...child, archivedAt: time }),
+            close: noObservationClose,
+          }),
         dispatch: (command) =>
           Effect.sync(() => {
             trace.push(command.type);
@@ -639,7 +831,8 @@ describe("AgentOrchestrationService", () => {
         listAgentRoots: Effect.succeed([]),
         getProviders: Effect.succeed([provider("codex")]),
         startChildTurn: () => Effect.die("unused"),
-        observeChild: () => Effect.succeed({ initial: child, changes: Stream.never }),
+        observeChild: () =>
+          Effect.succeed({ initial: child, changes: Stream.never, close: noObservationClose }),
         dispatch: () => Effect.void,
       });
       const layer = AgentOrchestrationService.layer.pipe(
@@ -691,6 +884,7 @@ describe("AgentOrchestrationService", () => {
         return Effect.succeed({
           initial: observations === 1 ? running : idle,
           changes: Stream.never,
+          close: noObservationClose,
         });
       },
       dispatch: (command) =>
@@ -852,7 +1046,11 @@ describe("AgentOrchestrationService", () => {
         startChildTurn: () => Effect.die("unused"),
         observeChild: () => {
           observations += 1;
-          return Effect.succeed({ initial: current, changes: Stream.make(current) });
+          return Effect.succeed({
+            initial: current,
+            changes: Stream.make(current),
+            close: noObservationClose,
+          });
         },
         dispatch: (command) =>
           Effect.sync(() => {
@@ -905,7 +1103,11 @@ describe("AgentOrchestrationService", () => {
         startChildTurn: () => Effect.die("unused"),
         observeChild: () => {
           observations += 1;
-          return Effect.succeed({ initial: current, changes: Stream.never });
+          return Effect.succeed({
+            initial: current,
+            changes: Stream.never,
+            close: noObservationClose,
+          });
         },
         dispatch: (command) =>
           Effect.sync(() => {

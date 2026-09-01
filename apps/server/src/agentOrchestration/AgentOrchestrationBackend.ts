@@ -19,6 +19,8 @@ export interface AgentChildObservation {
   /** Captured after the live subscription is installed. */
   readonly initial: OrchestrationThread;
   readonly changes: Stream.Stream<OrchestrationThread, AgentOrchestrationBackendError>;
+  /** Closes the detached subscription scope. Safe to call from the owner exactly once. */
+  readonly close: Effect.Effect<void>;
 }
 
 export interface StartChildTurnRequest {

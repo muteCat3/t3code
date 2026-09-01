@@ -584,6 +584,10 @@ describe("T3 child-agent developer instructions", () => {
     NodeAssert.match(attached, /t3-orchestration/);
     NodeAssert.match(attached, /agent_spawn/);
     NodeAssert.match(attached, /Native in-process Codex collaboration children are unsupported/);
+    NodeAssert.match(attached, /Approval custody is Ben-owned/);
+    NodeAssert.match(attached, /Persistent, destructive, costly, or ambiguous/);
+    NodeAssert.match(attached, /acceptForSession/);
+    NodeAssert.match(attached, /acceptAlways/);
 
     const detached = buildCodexDeveloperInstructions("default", runtime, false, false);
     NodeAssert.doesNotMatch(detached, /agent_\*/);

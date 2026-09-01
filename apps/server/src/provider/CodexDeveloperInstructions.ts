@@ -28,6 +28,8 @@ const T3_AGENT_ORCHESTRATION_INSTRUCTIONS = `
 The \`t3-orchestration\` MCP server is attached to this top-level Root thread. Use its \`agent_*\` tools for delegation; they create durable T3 child threads that remain visible and controllable in the product.
 
 Native in-process Codex collaboration children are unsupported in T3 Code orchestration because they inherit the Root MCP identity. Do not use native collaboration tools for delegation. Use \`agent_spawn\` and the corresponding \`agent_send\`, \`agent_wait\`, \`agent_inspect\`, \`agent_respond\`, \`agent_interrupt\`, \`agent_archive\`, and \`agent_unarchive\` tools instead.
+
+Approval custody is Ben-owned. You may answer only routine, one-time approval requests when Ben's instruction already supplies the answer. Persistent, destructive, costly, or ambiguous approval requests must be relayed to Ben in the Root chat; never use \`acceptForSession\` or \`acceptAlways\` through \`agent_respond\`.
 `;
 
 const orchestrationToolInstructions = (orchestrationToolsAvailable: boolean): string =>

@@ -145,6 +145,14 @@ export const ProviderApprovalDecision = Schema.Literals([
   "cancel",
 ]);
 export type ProviderApprovalDecision = typeof ProviderApprovalDecision.Type;
+/**
+ * Agent orchestration may only answer one-time approval requests. Persistent
+ * approval changes remain in Ben's Root custody and are deliberately excluded
+ * from the agent-facing contract, while providers retain the full decision
+ * vocabulary above.
+ */
+export const AgentApprovalDecision = Schema.Literals(["accept", "decline", "cancel"]);
+export type AgentApprovalDecision = typeof AgentApprovalDecision.Type;
 export const ProviderApprovalOption = Schema.Struct({
   decision: ProviderApprovalDecision,
   label: TrimmedNonEmptyString,
@@ -750,7 +758,7 @@ const AgentRespondInputWire = Schema.Union([
     threadId: ThreadId,
     kind: Schema.Literal("approval"),
     requestId: ApprovalRequestId,
-    decision: ProviderApprovalDecision,
+    decision: AgentApprovalDecision,
   }),
   Schema.Struct({
     threadId: ThreadId,
@@ -764,7 +772,7 @@ const AgentRespondInputSource = Schema.Struct({
   threadId: ThreadId,
   kind: Schema.Literals(["approval", "user-input"]),
   requestId: ApprovalRequestId,
-  decision: Schema.optional(ProviderApprovalDecision),
+  decision: Schema.optional(AgentApprovalDecision),
   answers: Schema.optional(ProviderUserInputAnswers),
 }).check(
   Schema.makeFilter((input) => {

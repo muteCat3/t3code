@@ -10,6 +10,13 @@ import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/uns
 
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpSessionRegistry from "./McpSessionRegistry.ts";
+import * as OrchestrationMcpInvocationContext from "./OrchestrationMcpInvocationContext.ts";
+import * as OrchestrationMcpHttpServer from "./OrchestrationMcpHttpServer.ts";
+import * as OrchestrationMcpSessionRegistry from "./OrchestrationMcpSessionRegistry.ts";
+import { AgentOrchestrationService } from "../agentOrchestration/AgentOrchestrationService.ts";
+import { AgentToolkit } from "./toolkits/agents/tools.ts";
+import { AgentToolkitHandlersLive } from "./toolkits/agents/handlers.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
@@ -147,6 +154,145 @@ it.effect("terminates HTTP MCP sessions with DELETE", () =>
         ),
       });
       expect(reusedSessionResponse.status).toBe(404);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("keeps preview and orchestration HTTP tools/list registries isolated", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const previewRegistry = {
+        resolve: (token: string) =>
+          Effect.succeed(token === "preview-token" ? invocation : undefined),
+      } as McpSessionRegistry.McpSessionRegistryShape;
+      const orchestrationInvocation = {
+        environmentId,
+        threadId,
+        providerSessionId: "provider-session-orchestration-test",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        issuedAt: 1,
+      } satisfies OrchestrationMcpInvocationContext.OrchestrationMcpInvocationScope;
+      const orchestrationRegistry = {
+        resolve: (token: string) =>
+          Effect.succeed(token === "orchestration-token" ? orchestrationInvocation : undefined),
+      } as OrchestrationMcpSessionRegistry.OrchestrationMcpSessionRegistryShape;
+      const previewLayer = McpHttpServer.layer.pipe(
+        Layer.provide(Layer.succeed(McpSessionRegistry.McpSessionRegistry, previewRegistry)),
+        Layer.provide(PreviewAutomationBroker.layer),
+        Layer.provide(NodeServices.layer),
+      );
+      const orchestrationLayer = Layer.effectDiscard(McpServer.registerToolkit(AgentToolkit)).pipe(
+        Layer.provide(AgentToolkitHandlersLive),
+        Layer.provideMerge(Layer.fresh(OrchestrationMcpHttpServer.OrchestrationMcpTransportLive)),
+        Layer.provide(
+          Layer.succeed(
+            OrchestrationMcpSessionRegistry.OrchestrationMcpSessionRegistry,
+            orchestrationRegistry,
+          ),
+        ),
+        Layer.provide(Layer.succeed(AgentOrchestrationService, {} as never)),
+      );
+      const routes = Layer.merge(previewLayer, orchestrationLayer);
+      yield* HttpRouter.serve(routes, { disableListenLog: true, disableLogger: true }).pipe(
+        Layer.build,
+      );
+      const httpClient = yield* HttpClient.HttpClient;
+      const initialize = (path: string, token: string, id: number) =>
+        httpClient.post(path, {
+          headers: {
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${token}`,
+          },
+          body: HttpBody.text(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id,
+              method: "initialize",
+              params: {
+                protocolVersion: "2025-06-18",
+                capabilities: {},
+                clientInfo: { name: "mcp-isolation-test", version: "1.0.0" },
+              },
+            }),
+            "application/json",
+          ),
+        });
+      const previewInitialize = yield* initialize("/mcp", "preview-token", 1);
+      const orchestrationInitialize = yield* initialize(
+        "/mcp/orchestration",
+        "orchestration-token",
+        2,
+      );
+      expect(previewInitialize.status).toBe(200);
+      expect(orchestrationInitialize.status).toBe(200);
+      const previewSession = previewInitialize.headers["mcp-session-id"];
+      const orchestrationSession = orchestrationInitialize.headers["mcp-session-id"];
+      expect(previewSession).toBeTruthy();
+      expect(orchestrationSession).toBeTruthy();
+      expect((yield* initialize("/mcp", "orchestration-token", 5)).status).toBe(401);
+      expect((yield* initialize("/mcp/orchestration", "preview-token", 6)).status).toBe(401);
+      const markInitialized = (path: string, token: string, session: string) =>
+        httpClient.post(path, {
+          headers: {
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${token}`,
+            "mcp-session-id": session,
+            "mcp-protocol-version": "2025-06-18",
+          },
+          body: HttpBody.text(
+            JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+            "application/json",
+          ),
+        });
+      const previewInitialized = yield* markInitialized("/mcp", "preview-token", previewSession!);
+      const orchestrationInitialized = yield* markInitialized(
+        "/mcp/orchestration",
+        "orchestration-token",
+        orchestrationSession!,
+      );
+      expect(previewInitialized.status).toBe(202);
+      expect(orchestrationInitialized.status).toBe(202);
+      const toolsList = (path: string, token: string, session: string, id: number) =>
+        httpClient.post(path, {
+          headers: {
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${token}`,
+            "mcp-session-id": session,
+            "mcp-protocol-version": "2025-06-18",
+          },
+          body: HttpBody.text(
+            JSON.stringify({ jsonrpc: "2.0", id, method: "tools/list", params: {} }),
+            "application/json",
+          ),
+        });
+      const previewToolsResponse = yield* toolsList("/mcp", "preview-token", previewSession!, 3);
+      const orchestrationToolsResponse = yield* toolsList(
+        "/mcp/orchestration",
+        "orchestration-token",
+        orchestrationSession!,
+        4,
+      );
+      expect(previewToolsResponse.status).toBe(200);
+      expect(orchestrationToolsResponse.status).toBe(200);
+      const readSseJson = (body: string) => {
+        const data = body
+          .split("\n")
+          .find((line) => line.startsWith("data: "))
+          ?.slice("data: ".length);
+        return JSON.parse(data ?? body) as { result: { tools: Array<{ name: string }> } };
+      };
+      const previewTools = readSseJson(yield* previewToolsResponse.text);
+      const orchestrationTools = readSseJson(yield* orchestrationToolsResponse.text);
+      const previewNames = previewTools.result.tools.map(({ name }) => name);
+      const orchestrationNames = orchestrationTools.result.tools.map(({ name }) => name);
+      expect(previewNames.length).toBeGreaterThan(0);
+      expect(previewNames).toContain("preview_status");
+      expect(previewNames.every((name) => name.startsWith("preview_"))).toBe(true);
+      expect(previewNames).not.toContain("agent_spawn");
+      expect(orchestrationNames).toContain("agent_spawn");
+      expect(orchestrationNames.every((name) => name.startsWith("agent_"))).toBe(true);
+      expect(orchestrationNames).not.toContain("preview_status");
+      expect(orchestrationTools.result.tools.length).toBeGreaterThan(0);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

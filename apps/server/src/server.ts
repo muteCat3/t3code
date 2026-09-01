@@ -478,9 +478,17 @@ const PullRequestServiceLive = PullRequestService.layer.pipe(
   Layer.provide(VcsProcess.layer),
 );
 
-const OrchestrationMcpLayerLive = McpServer.toolkit(AgentToolkit).pipe(
+// Keep only the orchestration transport's McpServer and protocol-state graph
+// independent from the preview `/mcp` graph. The application services remain
+// shared: making the whole graph fresh would duplicate orchestration workers
+// and registries. `registerToolkit` is used directly so registration consumes
+// the one fresh McpServer supplied by this transport.
+const OrchestrationMcpTransportLive = Layer.fresh(
+  OrchestrationMcpHttpServer.OrchestrationMcpTransportLive,
+);
+const OrchestrationMcpLayerLive = Layer.effectDiscard(McpServer.registerToolkit(AgentToolkit)).pipe(
   Layer.provide(AgentToolkitHandlersLive),
-  Layer.provideMerge(OrchestrationMcpHttpServer.OrchestrationMcpTransportLive),
+  Layer.provideMerge(OrchestrationMcpTransportLive),
   Layer.provide(OrchestrationMcpSessionRegistry.layer),
   Layer.provide(AgentOrchestrationLayerLive),
 );
@@ -504,8 +512,8 @@ export const makeRoutesLayer = Layer.mergeAll(
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
   OrchestrationMcpLayerLive,
 ).pipe(
-  // Both transports consume the same service instance, so caches single-flight across clients
-  // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
+  // Both transports share the application services, while their MCP server and
+  // protocol state remain isolated by OrchestrationMcpLayerLive above.
   Layer.provide(PullRequestServiceLive),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer),

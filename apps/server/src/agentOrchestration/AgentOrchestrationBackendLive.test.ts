@@ -78,6 +78,7 @@ describe("AgentOrchestrationBackendLive", () => {
         const head = yield* Stream.runHead(observation.changes).pipe(Effect.forkChild);
         yield* PubSub.publish(hub, child);
         yield* Fiber.join(head);
+        yield* observation.close;
         expect(hub.subscribers.size).toBe(0);
       }
     }),

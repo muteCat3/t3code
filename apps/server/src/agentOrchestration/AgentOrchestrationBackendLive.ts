@@ -63,7 +63,10 @@ export const subscribeChildChanges = (hub: PubSub.PubSub<OrchestrationThread>) =
     );
     const close = Scope.close(scope, Exit.void);
     return {
-      changes: Stream.fromSubscription(subscription).pipe(Stream.ensuring(close)),
+      // The observation owner closes this detached scope. Keeping the stream
+      // itself open avoids a second close when callers use the explicit close
+      // on early returns and timeout paths.
+      changes: Stream.fromSubscription(subscription),
       close,
     };
   });
@@ -393,6 +396,7 @@ const makeBackend = Effect.gen(function* () {
     return {
       initial,
       changes: observation.changes,
+      close: observation.close,
     } satisfies AgentChildObservation;
   });
 
@@ -421,103 +425,106 @@ const makeBackend = Effect.gen(function* () {
       const branch = `t3code/${branchSuffix}`;
       const childHub = yield* getChildHub(childId);
       const childObservation = yield* subscribeChildChanges(childHub);
-      const createdAt = yield* makeTimestamp;
-
-      yield* startup.enqueueCommand(
-        dispatchBootstrapTurnStartCore({
-          command: {
-            type: "thread.turn.start",
-            commandId: CommandId.make(`agent-turn:${yield* crypto.randomUUIDv4}`),
-            threadId: childId,
-            message: {
-              messageId: MessageId.make(`agent-message:${yield* crypto.randomUUIDv4}`),
-              role: "user",
-              text: request.brief,
-              attachments: [],
-            },
-            modelSelection: request.modelSelection,
-            runtimeMode: request.runtimeMode,
-            interactionMode: request.interactionMode,
-            createdAt,
-            bootstrap: {
-              createThread: {
-                projectId: request.project.id,
-                agentParentThreadId: request.parentThreadId,
-                title: childTitle(request.brief),
+      const child = yield* Effect.onExit(
+        Effect.gen(function* () {
+          const createdAt = yield* makeTimestamp;
+          yield* startup.enqueueCommand(
+            dispatchBootstrapTurnStartCore({
+              command: {
+                type: "thread.turn.start",
+                commandId: CommandId.make(`agent-turn:${yield* crypto.randomUUIDv4}`),
+                threadId: childId,
+                message: {
+                  messageId: MessageId.make(`agent-message:${yield* crypto.randomUUIDv4}`),
+                  role: "user",
+                  text: request.brief,
+                  attachments: [],
+                },
                 modelSelection: request.modelSelection,
                 runtimeMode: request.runtimeMode,
                 interactionMode: request.interactionMode,
-                branch: parent.branch,
-                // null is the canonical shared-workspace representation. The
-                // provider cwd falls back to project.workspaceRoot; stamping
-                // that root as a worktree would make cleanup treat it as owned.
-                worktreePath: null,
                 createdAt,
+                bootstrap: {
+                  createThread: {
+                    projectId: request.project.id,
+                    agentParentThreadId: request.parentThreadId,
+                    title: childTitle(request.brief),
+                    modelSelection: request.modelSelection,
+                    runtimeMode: request.runtimeMode,
+                    interactionMode: request.interactionMode,
+                    branch: parent.branch,
+                    // null is the canonical shared-workspace representation. The
+                    // provider cwd falls back to project.workspaceRoot; stamping
+                    // that root as a worktree would make cleanup treat it as owned.
+                    worktreePath: null,
+                    createdAt,
+                  },
+                  ...(request.isolation === "managed-worktree"
+                    ? {
+                        prepareWorktree: {
+                          projectCwd: request.project.workspaceRoot,
+                          baseBranch: parent.branch ?? "HEAD",
+                          branch,
+                        },
+                        runSetupScript: true,
+                      }
+                    : {}),
+                },
               },
-              ...(request.isolation === "managed-worktree"
-                ? {
-                    prepareWorktree: {
-                      projectCwd: request.project.workspaceRoot,
-                      baseBranch: parent.branch ?? "HEAD",
-                      branch,
-                    },
-                    runSetupScript: true,
-                  }
-                : {}),
-            },
-          },
-          makeCommandId: (tag) =>
-            crypto.randomUUIDv4.pipe(
-              Effect.map((uuid) => CommandId.make(`agent:${tag}:${uuid}`)),
-              Effect.mapError(backendError("Generating an agent bootstrap command id")),
-            ),
-          dispatch: (command) =>
-            engine
-              .dispatch(command)
-              .pipe(Effect.mapError(backendError("Dispatching an agent bootstrap command"))),
-          drainThreadDeletionThrough: (sequence) =>
-            threadDeletionReactor
-              .drainThrough(sequence)
-              .pipe(Effect.mapError(backendError("Draining prior child deletion"))),
-          prepareWorktree: () =>
-            gitDriver
-              .resolveCommit({
-                cwd: parent.worktreePath ?? request.project.workspaceRoot,
-                revision: "HEAD",
-              })
-              .pipe(
-                Effect.flatMap(({ commitSha }) =>
-                  git.createWorktree(
-                    makeManagedWorktreeInput({
-                      projectWorkspaceRoot: request.project.workspaceRoot,
-                      parentHeadCommit: commitSha,
-                      branch,
-                    }),
-                  ),
+              makeCommandId: (tag) =>
+                crypto.randomUUIDv4.pipe(
+                  Effect.map((uuid) => CommandId.make(`agent:${tag}:${uuid}`)),
+                  Effect.mapError(backendError("Generating an agent bootstrap command id")),
                 ),
-                Effect.map((worktree) => ({
-                  branch: worktree.worktree.refName,
-                  worktreePath: worktree.worktree.path,
-                })),
-                Effect.mapError(backendError("Preparing the managed child worktree")),
-              ),
-          afterWorktreePrepared: () => Effect.void,
-          runSetupScript: ({ projectId, projectCwd, worktreePath }) =>
-            setupScriptRunner
-              .runForThread({
-                threadId: childId,
-                ...(projectId ? { projectId } : {}),
-                ...(projectCwd ? { projectCwd } : {}),
-                worktreePath,
-              })
-              .pipe(
-                Effect.asVoid,
-                Effect.catch(() => Effect.void),
-              ),
+              dispatch: (command) =>
+                engine
+                  .dispatch(command)
+                  .pipe(Effect.mapError(backendError("Dispatching an agent bootstrap command"))),
+              drainThreadDeletionThrough: (sequence) =>
+                threadDeletionReactor
+                  .drainThrough(sequence)
+                  .pipe(Effect.mapError(backendError("Draining prior child deletion"))),
+              prepareWorktree: () =>
+                gitDriver
+                  .resolveCommit({
+                    cwd: parent.worktreePath ?? request.project.workspaceRoot,
+                    revision: "HEAD",
+                  })
+                  .pipe(
+                    Effect.flatMap(({ commitSha }) =>
+                      git.createWorktree(
+                        makeManagedWorktreeInput({
+                          projectWorkspaceRoot: request.project.workspaceRoot,
+                          parentHeadCommit: commitSha,
+                          branch,
+                        }),
+                      ),
+                    ),
+                    Effect.map((worktree) => ({
+                      branch: worktree.worktree.refName,
+                      worktreePath: worktree.worktree.path,
+                    })),
+                    Effect.mapError(backendError("Preparing the managed child worktree")),
+                  ),
+              afterWorktreePrepared: () => Effect.void,
+              runSetupScript: ({ projectId, projectCwd, worktreePath }) =>
+                setupScriptRunner
+                  .runForThread({
+                    threadId: childId,
+                    ...(projectId ? { projectId } : {}),
+                    ...(projectCwd ? { projectCwd } : {}),
+                    worktreePath,
+                  })
+                  .pipe(
+                    Effect.asVoid,
+                    Effect.catch(() => Effect.void),
+                  ),
+            }),
+          );
+          return yield* getThread(childId);
         }),
+        (exit) => (Exit.isFailure(exit) ? childObservation.close : Effect.void),
       );
-
-      const child = yield* getThread(childId);
       if (child === null || child.agentParentThreadId !== request.parentThreadId) {
         yield* childObservation.close;
         return yield* Effect.fail(
@@ -531,6 +538,7 @@ const makeBackend = Effect.gen(function* () {
         observation: {
           initial: child,
           changes: childObservation.changes,
+          close: childObservation.close,
         },
       };
     },

@@ -1309,6 +1309,18 @@ it.effect("agent tool inputs enforce provider-agnostic target and response union
         decision: "accept",
         answers: { confirmation: true },
       },
+      {
+        threadId: "thread-child",
+        kind: "approval",
+        requestId: "request-6",
+        decision: "acceptForSession",
+      },
+      {
+        threadId: "thread-child",
+        kind: "approval",
+        requestId: "request-7",
+        decision: "acceptAlways",
+      },
     ];
     for (const invalid of invalidResponses) {
       const result = yield* Effect.exit(decodeAgentRespondInput(invalid));
